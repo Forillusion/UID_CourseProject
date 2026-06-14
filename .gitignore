@@ -1,5 +1,3 @@
 .opencode/
-*.asv
-*.m~
-*.mat
-*.png
+
+.gitignore
