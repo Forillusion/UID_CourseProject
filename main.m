@@ -690,10 +690,75 @@ end
 %   旋转地图（占位回调，步骤 E 实现）
 %% ====================================================================
 function onRotChanged(fig, src)
-    % 步骤 E 实现
+%ONROTCHANGED  地图旋转回调（手搓反向映射）
     deg = src.Value;
-    if deg == 0, return; end
-    setStatus(fig, sprintf('地图旋转功能将在步骤E实现 (当前 %g°)', deg));
+    S = getS(fig);
+    if isempty(S.mapOrigin), return; end
+    setStatus(fig, sprintf('正在旋转地图 %g° ...', deg));
+    drawnow;
+    if deg == 0
+        % 恢复原图
+        S.mapDisplay = S.mapOrigin;
+        setS(fig, S);
+        drawSkeletonOnMap(fig);   % 重新叠加骨架+车辆
+        S = getS(fig);
+        for i = 1:numel(S.vehicles)
+            S.mapDisplay = drawIV(S.mapDisplay, ...
+                S.vehicles(i).cx, S.vehicles(i).cy, ...
+                S.vehicles(i).angle, S.vehicles(i).dispScale, ...
+                S.mapW, S.mapH, S.scale);
+        end
+        setS(fig, S);
+        refreshView(fig);
+        setStatus(fig, '地图已恢复（0°）。');
+        return;
+    end
+    % 手搓旋转：反向映射
+    rotated = rotateMap(S.mapOrigin, deg);
+    S.mapDisplay = rotated;
+    setS(fig, S);
+    refreshView(fig);
+    setStatus(fig, sprintf('地图已旋转 %g°（手搓反向映射）。', deg));
+end
+
+function out = rotateMap(img, deg)
+%ROTATEMAP  手搓图像旋转（反向映射 + 最近邻采样）
+%  对输出图每个像素，反向映射回原图取最近邻像素值。
+    [H, W, ~] = size(img);
+    th = deg2rad(deg);
+    c = cos(th); s = sin(th);
+
+    % 1. 计算旋转后新画布的外接尺寸
+    corners = [0 0; W 0; W H; 0 H];
+    rotCorners = corners * [c -s; s c]';
+    newW = ceil(max(rotCorners(:,1)) - min(rotCorners(:,1)));
+    newH = ceil(max(rotCorners(:,2)) - min(rotCorners(:,2)));
+    out = uint8(zeros(newH, newW, 3));
+
+    % 2. 新旧画布中心
+    cxOld = W/2; cyOld = H/2;
+    cxNew = newW/2; cyNew = newH/2;
+
+    % 3. 向量化反向映射（避免慢速双重循环）
+    [rr, cc] = meshgrid(1:newW, 1:newH);  % rr=行(y), cc=列(x)
+    x = cc(:) - cxNew;          % 相对新中心
+    y = rr(:) - cyNew;
+    % 反向旋转（用 -th）：将新图坐标映射回原图坐标
+    xOld =  x*c + y*s + cxOld;
+    yOld = -x*s + y*c + cyOld;
+    rOld = round(yOld);
+    cOld = round(xOld);
+    % 4. 有效区域掩膜
+    valid = rOld>=1 & rOld<=H & cOld>=1 & cOld<=W;
+    idx = find(valid);
+    out(idx) = img(rOld(idx) + (cOld(idx)-1)*H);   % 线性索引（列优先）
+    % RGB 三通道一起赋值（上面的线性索引对 3D 自动广播）
+    for ch = 1:3
+        tmp = out(:,:,ch);
+        tmp2 = img(:,:,ch);
+        tmp(idx) = tmp2(rOld(idx) + (cOld(idx)-1)*H);
+        out(:,:,ch) = tmp;
+    end
 end
 
 
