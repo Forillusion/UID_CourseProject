@@ -173,11 +173,20 @@ function h = buildPanel(pnl, fig)
     r = r + 1;
     addC('label', r, 'Text','提示: 加载前请先生成道路掩膜', 'FontSize',8, 'FontAngle','italic');
 
-    % ----- 测量分组（占位） -----
+    % ----- 测量分组 -----
     r = r + 1;
     addC('label', r, 'Text','──── 测量 ────', 'FontSize',11, 'FontWeight','bold');
     r = r + 1;
-    addC('label', r, 'Text','(步骤F 实现)', 'FontSize',8, 'FontAngle','italic');
+    h.btnMeasure2 = addC('button', r, 'Text','两点测距', ...
+                         'ButtonPushedFcn', @(s,e) onBtnMeasure2(fig));
+    r = r + 1;
+    h.btnTrack = addC('button', r, 'Text','轨迹测量', ...
+                      'ButtonPushedFcn', @(s,e) onBtnTrack(fig));
+    r = r + 1;
+    h.btnClearMeasure = addC('button', r, 'Text','清除测量标记', ...
+                             'ButtonPushedFcn', @(s,e) onBtnClearMeasure(fig));
+    r = r + 1;
+    h.measureLabel = addC('label', r, 'Text','距离: ---', 'FontSize',9, 'FontWeight','bold');
 
     % ----- 坐标显示 -----
     r = r + 1;
@@ -228,6 +237,10 @@ function onMouseDown(fig, ~)
             handleEraseClick(fig, col, row);
         case 'loadIV'
             handleLoadIVClick(fig, col, row);
+        case 'measure2'
+            handleMeasure2Click(fig, col, row);
+        case 'track'
+            handleTrackClick(fig, col, row);
         otherwise
             % idle：仅显示坐标，已在上面处理
     end
@@ -673,6 +686,133 @@ function onBtnReportIV(fig)
     msg = strjoin(lines, newline);
     uialert(fig, msg, '所有车辆位置报告');
     setStatus(fig, sprintf('已报告 %d 辆车的位置。', numel(S.vehicles)));
+end
+
+%% ====================================================================
+%   测量功能（步骤 F）
+%% ====================================================================
+function onBtnMeasure2(fig)
+    S = getS(fig);
+    S.mode = 'measure2';
+    S.measurePts = zeros(0,2);
+    setS(fig, S);
+    setStatus(fig, '两点测距：请点击第一个点。');
+    S.handles.measureLabel.Text = '距离: ---';
+end
+
+function onBtnTrack(fig)
+    S = getS(fig);
+    S.mode = 'track';
+    S.measurePts = zeros(0,2);
+    setS(fig, S);
+    setStatus(fig, '轨迹测量：连续点击多个点，右键结束并显示总长度。');
+    S.handles.measureLabel.Text = '长度: 0.00 m';
+end
+
+function onBtnClearMeasure(fig)
+    S = getS(fig);
+    S.mode = 'idle';
+    S.measurePts = zeros(0,2);
+    setS(fig, S);
+    drawAllVehicles(fig);   % 恢复到不含测量标记的视图
+    setStatus(fig, '测量标记已清除。');
+    S.handles.measureLabel.Text = '距离: ---';
+end
+
+function handleMeasure2Click(fig, col, row)
+    S = getS(fig);
+    S.measurePts(end+1, :) = [col, row];   %#ok<AGROW>
+    nPts = size(S.measurePts, 1);
+    if nPts == 1
+        setS(fig, S);
+        drawMeasurement(fig);
+        setStatus(fig, '已选第一点，请点击第二个点。');
+    elseif nPts == 2
+        setS(fig, S);
+        drawMeasurement(fig);
+        d = norm(S.measurePts(2,:) - S.measurePts(1,:)) * S.scale;
+        S.handles.measureLabel.Text = sprintf('距离: %.2f m', d);
+        S.mode = 'idle';
+        setS(fig, S);
+        setStatus(fig, sprintf('两点距离: %.2f m', d));
+    end
+end
+
+function handleTrackClick(fig, col, row)
+    S = getS(fig);
+    selType = get(fig, 'SelectionType');
+    if strcmp(selType, 'alt')   % 右键结束
+        S.mode = 'idle';
+        setS(fig, S);
+        totalLen = computeTrackLength(S.measurePts, S.scale);
+        S.handles.measureLabel.Text = sprintf('长度: %.2f m', totalLen);
+        setStatus(fig, sprintf('轨迹完成: %d 点, 总长 %.2f m', ...
+                  size(S.measurePts,1), totalLen));
+        return;
+    end
+    % 左键追加
+    S.measurePts(end+1, :) = [col, row];   %#ok<AGROW>
+    setS(fig, S);
+    drawMeasurement(fig);
+    totalLen = computeTrackLength(S.measurePts, S.scale);
+    S.handles.measureLabel.Text = sprintf('长度: %.2f m', totalLen);
+    setStatus(fig, sprintf('轨迹第 %d 点, 当前总长 %.2f m（右键结束）', ...
+              size(S.measurePts,1), totalLen));
+end
+
+function len = computeTrackLength(pts, scale)
+%COMPUTETRACKLENGTH  计算折线总长度（米）
+    len = 0;
+    for i = 2:size(pts,1)
+        len = len + norm(pts(i,:) - pts(i-1,:)) * scale;
+    end
+end
+
+function drawMeasurement(fig)
+%DRAWMEASUREMENT  在地图上绘制测量点+连线（青色）
+    S = getS(fig);
+    if isempty(S.mapOrigin), return; end
+    S.mapDisplay = S.mapOrigin;
+    setS(fig, S);
+    % 叠加骨架（如果有）
+    if ~isempty(S.sk.edges)
+        drawSkeletonOnMap(fig);
+    end
+    % 叠加车辆
+    S = getS(fig);
+    for i = 1:numel(S.vehicles)
+        S.mapDisplay = drawIV(S.mapDisplay, ...
+            S.vehicles(i).cx, S.vehicles(i).cy, ...
+            S.vehicles(i).angle, S.vehicles(i).dispScale, ...
+            S.mapW, S.mapH, S.scale);
+    end
+    % 叠加测量标记（青色线 + 品红节点）
+    pts = S.measurePts;
+    if size(pts,1) >= 2
+        for i = 2:size(pts,1)
+            pxs = bresenham(pts(i-1,1), pts(i-1,2), pts(i,1), pts(i,2));
+            for k = 1:size(pxs,1)
+                c = pxs(k,1); r = pxs(k,2);
+                if c>=1 && c<=S.mapW && r>=1 && r<=S.mapH
+                    S.mapDisplay(r, c, :) = uint8([0 220 220]);
+                end
+            end
+        end
+    end
+    % 画节点（品红 5x5）
+    for i = 1:size(pts,1)
+        c = round(pts(i,1)); r = round(pts(i,2));
+        for dr = -2:2
+            for dc = -2:2
+                rr = r+dr; cc = c+dc;
+                if cc>=1 && cc<=S.mapW && rr>=1 && rr<=S.mapH
+                    S.mapDisplay(rr, cc, :) = uint8([220 0 220]);
+                end
+            end
+        end
+    end
+    setS(fig, S);
+    refreshView(fig);
 end
 
 function onResize(fig, ~)
