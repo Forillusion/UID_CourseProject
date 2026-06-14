@@ -85,7 +85,7 @@ end % main() 返回 fig
 %   返回 handles 结构体，包含所有需后续访问的控件句柄
 %% ====================================================================
 function h = buildPanel(pnl, fig)
-    rows = 22;
+    rows = 28;
     pnl.RowHeight = repmat({'fit'}, rows, 1);
     pnl.ColumnWidth = {'1x'};
     h = struct();
@@ -128,6 +128,20 @@ function h = buildPanel(pnl, fig)
     r = r + 1;
     h.btnShowSkeleton = addC('button', r, 'Text','显示/刷新骨架', ...
                              'ButtonPushedFcn', @(s,e) onBtnShowSkeleton(fig));
+    r = r + 1;
+    addC('label', r, 'Text','道路半宽(像素):', 'FontSize',9);
+    r = r + 1;
+    h.roadWidthSlider = addC('slider', r, 'Value',2, 'Limits',[1 15], ...
+                             'MajorTicks',[1 5 10 15], ...
+                             'ValueChangedFcn', @(s,e) onRoadWidthChanged(fig,s));
+    r = r + 1;
+    h.roadWidthValue = addC('label', r, 'Text','当前: 2 像素', 'FontSize',9);
+    r = r + 1;
+    h.btnGenMask = addC('button', r, 'Text','生成道路掩膜', ...
+                        'ButtonPushedFcn', @(s,e) onBtnGenMask(fig));
+    r = r + 1;
+    h.btnShowRoad = addC('button', r, 'Text','显示道路区', ...
+                         'ButtonPushedFcn', @(s,e) onBtnShowRoad(fig));
     r = r + 1;
     addC('label', r, 'Text','提示: sketch模式 左键画点/右键结束折线', 'FontSize',8, 'FontAngle','italic');
 
@@ -307,6 +321,125 @@ function onBtnShowSkeleton(fig)
     drawSkeleton(fig);
     setStatus(fig, sprintf('骨架已显示： %d 节点, %d 线段', ...
               size(S.sk.nodes,1), size(S.sk.edges,1)));
+end
+
+%% ====================================================================
+%   道路掩膜相关回调（OR1 步骤C）
+%% ====================================================================
+function onRoadWidthChanged(fig, src)
+    S = getS(fig);
+    S.roadHalfWidth = round(src.Value);
+    setS(fig, S);
+    if isfield(S.handles, 'roadWidthValue')
+        S.handles.roadWidthValue.Text = sprintf('当前: %d 像素', S.roadHalfWidth);
+    end
+end
+
+function onBtnGenMask(fig)
+    S = getS(fig);
+    if isempty(S.sk.edges)
+        setStatus(fig, '无骨架！请先提取骨架再生成掩膜。');
+        uialert(fig, '请先点击"开始提取骨架"画出道路骨架，再生成掩膜。', '提示');
+        return;
+    end
+    setStatus(fig, sprintf('正在生成道路掩膜（半宽=%d像素）...', S.roadHalfWidth));
+    drawnow;   % 让状态栏立即刷新
+    S.roadMask = genRoadMask(S.sk.nodes, S.sk.edges, S.roadHalfWidth, S.mapW, S.mapH);
+    setS(fig, S);
+    roadPx = sum(S.roadMask(:));
+    setStatus(fig, sprintf('道路掩膜已生成： %d 像素（半宽=%d）。点击"显示道路区"查看。', ...
+              roadPx, S.roadHalfWidth));
+end
+
+function onBtnShowRoad(fig)
+    S = getS(fig);
+    if isempty(S.roadMask)
+        setStatus(fig, '请先点击"生成道路掩膜"。');
+        return;
+    end
+    S.mode = 'idle';
+    setS(fig, S);
+    drawRoadArea(fig);
+    setStatus(fig, sprintf('道路区已显示（半透明蓝色覆盖）。'));
+end
+
+function mask = genRoadMask(nodes, edges, halfWidth, mapW, mapH)
+%GENROADMASK  根据骨架生成道路掩膜（手写膨胀）
+%  对每条边，遍历其 bounding box(+margin) 内的像素，
+%  距离 < halfWidth 则标记为道路。
+    mask = false(mapH, mapW);
+    tol = halfWidth + 1;
+    for i = 1:size(edges, 1)
+        ni = edges(i,1); nj = edges(i,2);
+        A = nodes(ni,:); B = nodes(nj,:);
+        % bounding box
+        cMin = max(1, floor(min(A(1),B(1)) - tol));
+        cMax = min(mapW, ceil(max(A(1),B(1)) + tol));
+        rMin = max(1, floor(min(A(2),B(2)) - tol));
+        rMax = min(mapH, ceil(max(A(2),B(2)) + tol));
+        % 遍历 box 内每个像素
+        for r = rMin:rMax
+            for c = cMin:cMax
+                if ~mask(r, c)
+                    d = ptToSegDist([c, r], A, B);
+                    if d <= halfWidth
+                        mask(r, c) = true;
+                    end
+                end
+            end
+        end
+    end
+end
+
+function drawRoadArea(fig)
+%DRAWROADAREA  在地图上半透明覆盖道路区（蓝色）
+    S = getS(fig);
+    if isempty(S.mapOrigin) || isempty(S.roadMask), return; end
+    S.mapDisplay = S.mapOrigin;
+    % 半透明蓝色覆盖：newColor = old*0.5 + blue*0.5
+    overlayR = 30; overlayG = 100; overlayB = 220;
+    m = S.roadMask;
+    R = double(S.mapDisplay(:,:,1));
+    G = double(S.mapDisplay(:,:,2));
+    B = double(S.mapDisplay(:,:,3));
+    R(m) = R(m)*0.5 + overlayR*0.5;
+    G(m) = G(m)*0.5 + overlayG*0.5;
+    B(m) = B(m)*0.5 + overlayB*0.5;
+    S.mapDisplay = uint8(cat(3, R, G, B));
+    % 同时画骨架（红/黄）以便对比
+    drawSkeletonOnMap(fig);
+end
+
+function drawSkeletonOnMap(fig)
+%DRAWSKELETONONMAP  在当前 mapDisplay 上叠加骨架（不重置 mapDisplay）
+    S = getS(fig);
+    if isempty(S.mapDisplay), return; end
+    lineColor = uint8([255 0 0]);
+    for i = 1:size(S.sk.edges, 1)
+        ni = S.sk.edges(i,1); nj = S.sk.edges(i,2);
+        A = S.sk.nodes(ni,:); B = S.sk.nodes(nj,:);
+        pxs = bresenham(A(1), A(2), B(1), B(2));
+        for k = 1:size(pxs,1)
+            c = pxs(k,1); r = pxs(k,2);
+            if c>=1 && c<=S.mapW && r>=1 && r<=S.mapH
+                S.mapDisplay(r, c, :) = lineColor;
+            end
+        end
+    end
+    nodeColor = uint8([255 255 0]);
+    for i = 1:size(S.sk.nodes, 1)
+        c = round(S.sk.nodes(i,1)); r = round(S.sk.nodes(i,2));
+        for dr = -1:1
+            for dc = -1:1
+                rr = r+dr; cc = c+dc;
+                if cc>=1 && cc<=S.mapW && rr>=1 && rr<=S.mapH
+                    S.mapDisplay(rr, cc, :) = nodeColor;
+                end
+            end
+        end
+    end
+    setS(fig, S);
+    refreshView(fig);
 end
 
 function onResize(fig, ~)
