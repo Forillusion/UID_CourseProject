@@ -42,6 +42,10 @@ function fig = main()
     S.mapW      = 1404;      % 图像宽度（列数）—— 横向地图
     S.mapH      = 803;       % 图像高度（行数）
     S.mode      = 'idle';    % 交互模式状态机
+    S.rotDeg    = 0;         % 当前地图旋转角度
+    S.rotSize   = [];        % 旋转后画布尺寸 [newH newW]（空=未旋转）
+    S.dispH     = S.mapH;    % 当前显示图高度（行）
+    S.dispW     = S.mapW;    % 当前显示图宽度（列）
 
     % —— OR1 道路骨架相关（后续步骤填充） ——
     S.sk.nodes  = zeros(0,2);  % [N x 2]，每行 [col, row]
@@ -108,10 +112,11 @@ function h = buildPanel(pnl, fig)
     r = r + 1;
     addC('label', r, 'Text','──── 地图 ────', 'FontSize',11, 'FontWeight','bold');
     r = r + 1;
-    addC('label', r, 'Text','旋转角度 (度):');
+    h.rotLabel = addC('label', r, 'Text','旋转角度 (度): 0');
     r = r + 1;
-    h.rotEdit = addC('editfield', r, 'numeric', 'Value',0, 'Limits',[-360 360], ...
-                     'ValueChangedFcn', @(s,e) onRotChanged(fig,s));
+    h.rotSlider = addC('slider', r, 'Value',0, 'Limits',[-180 180], ...
+                       'MajorTicks',[-180 -90 0 90 180], ...
+                       'ValueChangedFcn', @(s,e) onRotChanged(fig,s));
 
     % ----- 骨架分组 (OR1) -----
     r = r + 1;
@@ -429,52 +434,71 @@ function mask = genRoadMask(nodes, edges, halfWidth, mapW, mapH)
 end
 
 function drawRoadArea(fig)
-%DRAWROADAREA  在地图上半透明覆盖道路区（蓝色）
+%DRAWROADAREA  在地图上半透明覆盖道路区（蓝色），叠加骨架，并应用当前旋转
     S = getS(fig);
     if isempty(S.mapOrigin) || isempty(S.roadMask), return; end
-    S.mapDisplay = S.mapOrigin;
+    map = S.mapOrigin;
     % 半透明蓝色覆盖：newColor = old*0.5 + blue*0.5
     overlayR = 30; overlayG = 100; overlayB = 220;
     m = S.roadMask;
-    R = double(S.mapDisplay(:,:,1));
-    G = double(S.mapDisplay(:,:,2));
-    B = double(S.mapDisplay(:,:,3));
+    R = double(map(:,:,1)); G = double(map(:,:,2)); B = double(map(:,:,3));
     R(m) = R(m)*0.5 + overlayR*0.5;
     G(m) = G(m)*0.5 + overlayG*0.5;
     B(m) = B(m)*0.5 + overlayB*0.5;
-    S.mapDisplay = uint8(cat(3, R, G, B));
-    % 同时画骨架（红/黄）以便对比
-    drawSkeletonOnMap(fig);
+    map = uint8(cat(3, R, G, B));
+    % 叠加骨架（红/黄）
+    map = overlaySkeleton(map, S.sk.nodes, S.sk.edges, S.mapW, S.mapH);
+    % 应用旋转
+    if S.rotDeg ~= 0
+        S.mapDisplay = rotateMap(map, S.rotDeg);
+        S.rotSize = [size(S.mapDisplay,1), size(S.mapDisplay,2)];
+    else
+        S.mapDisplay = map;
+        S.rotSize = [];
+    end
+    setS(fig, S);
+    refreshView(fig);
+end
+
+function map = overlaySkeleton(map, nodes, edges, mapW, mapH)
+%OVERLAYSKELETON  在地图矩阵上叠加骨架（粗实红线 + 黄色节点），纯函数无副作用
+    [H, W, ~] = size(map);
+    lineColor = uint8([255 0 0]);   % 红色实线
+    nodeColor = uint8([255 255 0]); % 黄色节点
+    lineR = 1;   % 线半宽=1 -> 3px 粗实线（避免对角线断裂成虚线）
+    nodeR = 2;
+    for i = 1:size(edges, 1)
+        ni = edges(i,1); nj = edges(i,2);
+        A = nodes(ni,:); B = nodes(nj,:);
+        pxs = bresenham(A(1), A(2), B(1), B(2));
+        for k = 1:size(pxs,1)
+            map = stampSquare(map, pxs(k,1), pxs(k,2), lineR, lineColor, W, H);
+        end
+    end
+    for i = 1:size(nodes, 1)
+        map = stampSquare(map, nodes(i,1), nodes(i,2), nodeR, nodeColor, W, H);
+    end
+end
+
+function map = stampSquare(map, cx, cy, radius, color, W, H)
+%STAMPSQUARE  在 (cx,cy) 处盖一个 (2*radius+1) 的实心方块
+    cc0 = round(cx); rr0 = round(cy);
+    for dr = -radius:radius
+        for dc = -radius:radius
+            rr = rr0 + dr; cc = cc0 + dc;
+            if cc>=1 && cc<=W && rr>=1 && rr<=H
+                map(rr, cc, :) = color;
+            end
+        end
+    end
 end
 
 function drawSkeletonOnMap(fig)
 %DRAWSKELETONONMAP  在当前 mapDisplay 上叠加骨架（不重置 mapDisplay）
     S = getS(fig);
     if isempty(S.mapDisplay), return; end
-    lineColor = uint8([255 0 0]);
-    for i = 1:size(S.sk.edges, 1)
-        ni = S.sk.edges(i,1); nj = S.sk.edges(i,2);
-        A = S.sk.nodes(ni,:); B = S.sk.nodes(nj,:);
-        pxs = bresenham(A(1), A(2), B(1), B(2));
-        for k = 1:size(pxs,1)
-            c = pxs(k,1); r = pxs(k,2);
-            if c>=1 && c<=S.mapW && r>=1 && r<=S.mapH
-                S.mapDisplay(r, c, :) = lineColor;
-            end
-        end
-    end
-    nodeColor = uint8([255 255 0]);
-    for i = 1:size(S.sk.nodes, 1)
-        c = round(S.sk.nodes(i,1)); r = round(S.sk.nodes(i,2));
-        for dr = -1:1
-            for dc = -1:1
-                rr = r+dr; cc = c+dc;
-                if cc>=1 && cc<=S.mapW && rr>=1 && rr<=S.mapH
-                    S.mapDisplay(rr, cc, :) = nodeColor;
-                end
-            end
-        end
-    end
+    S.mapDisplay = overlaySkeleton(S.mapDisplay, S.sk.nodes, S.sk.edges, ...
+                                   S.mapW, S.mapH);
     setS(fig, S);
     refreshView(fig);
 end
@@ -521,23 +545,38 @@ function handleLoadIVClick(fig, col, row)
               v.id, wx, wy, v.angle));
 end
 
-function drawAllVehicles(fig)
-%DRAWALLVEHICLES  重绘地图（原图+骨架+所有车辆）
+function composite = buildComposite(fig)
+%BUILDCOMPOSITE  构建完整叠加图（原图+骨架+车辆），不修改 mapDisplay，不刷新
+%  供 drawAllVehicles / 旋转 / 测量 共用，保证一致性
     S = getS(fig);
-    if isempty(S.mapOrigin), return; end
-    S.mapDisplay = S.mapOrigin;
-    setS(fig, S);
-    % 叠加骨架（如果有的话）
+    composite = S.mapOrigin;
+    if isempty(composite), return; end
+    % 叠加骨架（粗实线）
     if ~isempty(S.sk.edges)
-        drawSkeletonOnMap(fig);
+        composite = overlaySkeleton(composite, S.sk.nodes, S.sk.edges, ...
+                                    S.mapW, S.mapH);
     end
-    % 叠加每辆车
-    S = getS(fig);
+    % 叠加车辆
     for i = 1:numel(S.vehicles)
-        S.mapDisplay = drawIV(S.mapDisplay, ...
+        composite = drawIV(composite, ...
             S.vehicles(i).cx, S.vehicles(i).cy, ...
             S.vehicles(i).angle, S.vehicles(i).dispScale, ...
             S.mapW, S.mapH, S.scale);
+    end
+end
+
+function drawAllVehicles(fig)
+%DRAWALLVEHICLES  重绘地图（原图+骨架+所有车辆），考虑当前旋转角度
+    S = getS(fig);
+    if isempty(S.mapOrigin), return; end
+    composite = buildComposite(fig);
+    if S.rotDeg ~= 0
+        S = getS(fig);
+        S.mapDisplay = rotateMap(composite, S.rotDeg);
+        S.rotSize = [size(S.mapDisplay,1), size(S.mapDisplay,2)];
+    else
+        S.mapDisplay = composite;
+        S.rotSize = [];
     end
     setS(fig, S);
     refreshView(fig);
@@ -769,47 +808,32 @@ function len = computeTrackLength(pts, scale)
 end
 
 function drawMeasurement(fig)
-%DRAWMEASUREMENT  在地图上绘制测量点+连线（青色）
+%DRAWMEASUREMENT  在地图上绘制测量点+连线（青色），叠加在复合图上并应用旋转
     S = getS(fig);
     if isempty(S.mapOrigin), return; end
-    S.mapDisplay = S.mapOrigin;
-    setS(fig, S);
-    % 叠加骨架（如果有）
-    if ~isempty(S.sk.edges)
-        drawSkeletonOnMap(fig);
-    end
-    % 叠加车辆
-    S = getS(fig);
-    for i = 1:numel(S.vehicles)
-        S.mapDisplay = drawIV(S.mapDisplay, ...
-            S.vehicles(i).cx, S.vehicles(i).cy, ...
-            S.vehicles(i).angle, S.vehicles(i).dispScale, ...
-            S.mapW, S.mapH, S.scale);
-    end
-    % 叠加测量标记（青色线 + 品红节点）
+    % 1. 先构建复合图（原图+骨架+车辆）
+    map = buildComposite(fig);
+    [H, W, ~] = size(map);
+    % 2. 叠加测量标记（青色连线 + 品红节点）
     pts = S.measurePts;
     if size(pts,1) >= 2
         for i = 2:size(pts,1)
             pxs = bresenham(pts(i-1,1), pts(i-1,2), pts(i,1), pts(i,2));
             for k = 1:size(pxs,1)
-                c = pxs(k,1); r = pxs(k,2);
-                if c>=1 && c<=S.mapW && r>=1 && r<=S.mapH
-                    S.mapDisplay(r, c, :) = uint8([0 220 220]);
-                end
+                map = stampSquare(map, pxs(k,1), pxs(k,2), 1, uint8([0 220 220]), W, H);
             end
         end
     end
-    % 画节点（品红 5x5）
     for i = 1:size(pts,1)
-        c = round(pts(i,1)); r = round(pts(i,2));
-        for dr = -2:2
-            for dc = -2:2
-                rr = r+dr; cc = c+dc;
-                if cc>=1 && cc<=S.mapW && rr>=1 && rr<=S.mapH
-                    S.mapDisplay(rr, cc, :) = uint8([220 0 220]);
-                end
-            end
-        end
+        map = stampSquare(map, pts(i,1), pts(i,2), 2, uint8([220 0 220]), W, H);
+    end
+    % 3. 应用旋转
+    if S.rotDeg ~= 0
+        S.mapDisplay = rotateMap(map, S.rotDeg);
+        S.rotSize = [size(S.mapDisplay,1), size(S.mapDisplay,2)];
+    else
+        S.mapDisplay = map;
+        S.rotSize = [];
     end
     setS(fig, S);
     refreshView(fig);
@@ -830,35 +854,20 @@ end
 %   旋转地图（占位回调，步骤 E 实现）
 %% ====================================================================
 function onRotChanged(fig, src)
-%ONROTCHANGED  地图旋转回调（手搓反向映射）
-    deg = src.Value;
+%ONROTCHANGED  地图旋转回调（滑条）；对完整叠加图(地图+骨架+车辆)做手搓反向映射旋转
+    deg = round(src.Value);
     S = getS(fig);
     if isempty(S.mapOrigin), return; end
-    setStatus(fig, sprintf('正在旋转地图 %g° ...', deg));
-    drawnow;
-    if deg == 0
-        % 恢复原图
-        S.mapDisplay = S.mapOrigin;
-        setS(fig, S);
-        drawSkeletonOnMap(fig);   % 重新叠加骨架+车辆
-        S = getS(fig);
-        for i = 1:numel(S.vehicles)
-            S.mapDisplay = drawIV(S.mapDisplay, ...
-                S.vehicles(i).cx, S.vehicles(i).cy, ...
-                S.vehicles(i).angle, S.vehicles(i).dispScale, ...
-                S.mapW, S.mapH, S.scale);
-        end
-        setS(fig, S);
-        refreshView(fig);
-        setStatus(fig, '地图已恢复（0°）。');
-        return;
+    % 同步滑条与标签
+    src.Value = deg;
+    if isfield(S.handles,'rotLabel') && isvalid(S.handles.rotLabel)
+        S.handles.rotLabel.Text = sprintf('旋转角度 (度): %.0f', deg);
     end
-    % 手搓旋转：反向映射
-    rotated = rotateMap(S.mapOrigin, deg);
-    S.mapDisplay = rotated;
+    S.rotDeg = deg;
     setS(fig, S);
-    refreshView(fig);
-    setStatus(fig, sprintf('地图已旋转 %g°（手搓反向映射）。', deg));
+    % drawAllVehicles 会构建复合图并按 rotDeg 旋转（保证骨架/车辆一起转、不丢失）
+    drawAllVehicles(fig);
+    setStatus(fig, sprintf('地图已旋转 %.0f°（手搓反向映射）。', deg));
 end
 
 function out = rotateMap(img, deg)
@@ -931,30 +940,53 @@ function setStatus(fig, msg)
 end
 
 function refreshView(fig)
-%REFRESHVIEW  把当前 mapDisplay 显示到 axes
+%REFRESHVIEW  把当前 mapDisplay 显示到 axes（按旋转后尺寸设定坐标范围）
     S = getS(fig);
     if isempty(S.mapDisplay), return; end
+    [dH, dW, ~] = size(S.mapDisplay);
     imshow(S.mapDisplay, 'Parent', S.ax);
     axis(S.ax, 'image');
-    % 固定坐标，方便后续 get(gca,'CurrentPoint') 取像素
-    set(S.ax, 'XLim',[0.5 S.mapW+0.5], 'YLim',[0.5 S.mapH+0.5], ...
-              'YDir','normal');
-    % 注：YDir='normal' 让 row 向上，但 imshow 默认是 YDir='reverse'
-    % 我们统一用 reverse，便于和图像矩阵对应
-    set(S.ax, 'YDir','reverse');
+    % 按【显示图】尺寸设定坐标范围，保证旋转后大图不被裁切
+    set(S.ax, 'XLim',[0.5 dW+0.5], 'YLim',[0.5 dH+0.5], ...
+              'YDir','reverse');
+    % 记录显示尺寸，供 getPointerOnAxes 做边界判定与反旋转
+    S = getS(fig);
+    S.dispH = dH; S.dispW = dW;
+    setS(fig, S);
 end
 
 function pt = getPointerOnAxes(fig, ax)
-%GETPOINTERONAXES  返回鼠标在 axes 上的 [col, row]（连续值）
+%GETPOINTERONAXES  返回鼠标在【原始地图】坐标系下的 [col, row]
+%  若当前处于旋转态，先把鼠标点(显示坐标)反旋转回原图坐标，保证下游逻辑一致。
     pt = [];
     if ~isgraphics(ax), return; end
     cp = get(ax, 'CurrentPoint');
     if isempty(cp), return; end
-    col = cp(1,1); row = cp(1,2);
-    % 必须在图像范围内
+    colD = cp(1,1); rowD = cp(1,2);   % 显示图中的列/行
     S = getS(fig);
-    if col < 1 || col > S.mapW || row < 1 || row > S.mapH
+    % 边界判定用显示图尺寸
+    if colD < 1 || colD > S.dispW || rowD < 1 || rowD > S.dispH
         return;
+    end
+    if S.rotDeg ~= 0 && ~isempty(S.rotSize)
+        % 反旋转：显示坐标 -> 原图坐标
+        th = deg2rad(S.rotDeg);
+        c = cos(th); s = sin(th);
+        newH = S.rotSize(1); newW = S.rotSize(2);
+        x = colD - newW/2;          % 相对新(显示)中心
+        y = rowD - newH/2;
+        colO =  x*c + y*s + S.mapW/2;   % 反向旋转(-th)回原图
+        rowO = -x*s + y*c + S.mapH/2;
+        col = colO; row = rowO;
+        % 必须落在原图范围内（旋转后的黑边区域视为无效）
+        if col < 1 || col > S.mapW || row < 1 || row > S.mapH
+            return;
+        end
+    else
+        col = colD; row = rowD;
+        if col < 1 || col > S.mapW || row < 1 || row > S.mapH
+            return;
+        end
     end
     pt = [col row];
 end
@@ -979,39 +1011,13 @@ end
 %   骨架绘制
 %% ====================================================================
 function drawSkeleton(fig)
-%DRAWSKELETON  在地图副本上手绘骨架（红色线段 + 黄色节点）
+%DRAWSKELETON  在地图副本上手绘骨架（粗实红线 + 黄色节点），不考虑旋转
     S = getS(fig);
     if isempty(S.mapOrigin), return; end
-    S.mapDisplay = S.mapOrigin;   % 从原图重新复制
-
-    % —— 画线段（红色）——
-    lineColor = uint8([255 0 0]);
-    for i = 1:size(S.sk.edges, 1)
-        ni = S.sk.edges(i,1); nj = S.sk.edges(i,2);
-        A = S.sk.nodes(ni,:); B = S.sk.nodes(nj,:);
-        pxs = bresenham(A(1), A(2), B(1), B(2));
-        for k = 1:size(pxs,1)
-            c = pxs(k,1); r = pxs(k,2);
-            if c>=1 && c<=S.mapW && r>=1 && r<=S.mapH
-                S.mapDisplay(r, c, :) = lineColor;
-            end
-        end
-    end
-
-    % —— 画节点（黄色 3x3 方块）——
-    nodeColor = uint8([255 255 0]);
-    for i = 1:size(S.sk.nodes, 1)
-        c = round(S.sk.nodes(i,1)); r = round(S.sk.nodes(i,2));
-        for dr = -1:1
-            for dc = -1:1
-                rr = r+dr; cc = c+dc;
-                if cc>=1 && cc<=S.mapW && rr>=1 && rr<=S.mapH
-                    S.mapDisplay(rr, cc, :) = nodeColor;
-                end
-            end
-        end
-    end
-
+    S.mapDisplay = overlaySkeleton(S.mapOrigin, S.sk.nodes, S.sk.edges, ...
+                                   S.mapW, S.mapH);
+    S.rotDeg = 0;   % 显示骨架时回到 0°（绘制中不应处于旋转态）
+    S.rotSize = [];
     setS(fig, S);
     refreshView(fig);
 end

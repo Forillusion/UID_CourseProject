@@ -19,7 +19,7 @@ try
     assert(ismember('statusBar', fn), 'no statusBar');
     assert(ismember('coordX', fn), 'no coordX');
     assert(ismember('coordY', fn), 'no coordY');
-    assert(ismember('rotEdit', fn), 'no rotEdit');
+    assert(ismember('rotSlider', fn), 'no rotSlider');
     fprintf('[OK] handles OK: %s\n', strjoin(fn, ', '));
 
     % 检查 statusBar 文本已设置
