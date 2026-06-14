@@ -42,6 +42,7 @@ function fig = main()
     S.mapW      = 1404;      % 图像宽度（列数）—— 横向地图
     S.mapH      = 803;       % 图像高度（行数）
     S.mode      = 'idle';    % 交互模式状态机
+    S.sketchState = 'idle';  % 骨架工作流: idle/sketching/erasing/finalized
     S.rotDeg    = 0;         % 当前地图旋转角度
     S.rotSize   = [];        % 旋转后画布尺寸 [newH newW]（空=未旋转）
     S.dispH     = S.mapH;    % 当前显示图高度（行）
@@ -122,17 +123,19 @@ function h = buildPanel(pnl, fig)
     r = r + 1;
     addC('label', r, 'Text','──── 道路骨架 (OR1) ────', 'FontSize',11, 'FontWeight','bold');
     r = r + 1;
-    h.btnSketch = addC('button', r, 'Text','开始提取骨架', ...
+    h.btnSketch = addC('button', r, 'Text','提取骨架', ...
                        'ButtonPushedFcn', @(s,e) onBtnSketch(fig));
     r = r + 1;
-    h.btnErase = addC('button', r, 'Text','擦除线段', ...
+    h.btnFinishSketch = addC('button', r, 'Text','提取结束', ...
+                             'Enable','off', ...
+                             'ButtonPushedFcn', @(s,e) onBtnFinishSketch(fig));
+    r = r + 1;
+    h.btnErase = addC('button', r, 'Text','擦除道路', ...
+                      'Enable','off', ...
                       'ButtonPushedFcn', @(s,e) onBtnErase(fig));
     r = r + 1;
-    h.btnClearSkeleton = addC('button', r, 'Text','清空骨架', ...
+    h.btnClearSkeleton = addC('button', r, 'Text','清空道路', ...
                               'ButtonPushedFcn', @(s,e) onBtnClearSkeleton(fig));
-    r = r + 1;
-    h.btnShowSkeleton = addC('button', r, 'Text','显示/刷新骨架', ...
-                             'ButtonPushedFcn', @(s,e) onBtnShowSkeleton(fig));
     r = r + 1;
     addC('label', r, 'Text','道路半宽(像素):', 'FontSize',9);
     r = r + 1;
@@ -142,13 +145,11 @@ function h = buildPanel(pnl, fig)
     r = r + 1;
     h.roadWidthValue = addC('label', r, 'Text','当前: 2 像素', 'FontSize',9);
     r = r + 1;
-    h.btnGenMask = addC('button', r, 'Text','生成道路掩膜', ...
-                        'ButtonPushedFcn', @(s,e) onBtnGenMask(fig));
+    h.sketchModeLabel = addC('label', r, 'Text','当前模式: 空闲', ...
+                             'FontSize',10, 'FontWeight','bold', ...
+                             'FontColor',[0 0.5 0]);
     r = r + 1;
-    h.btnShowRoad = addC('button', r, 'Text','显示道路区', ...
-                         'ButtonPushedFcn', @(s,e) onBtnShowRoad(fig));
-    r = r + 1;
-    addC('label', r, 'Text','提示: sketch模式 左键画点/右键结束折线', 'FontSize',8, 'FontAngle','italic');
+    addC('label', r, 'Text','左键画点 右键结束折线 | 擦除:点线段删除', 'FontSize',8, 'FontAngle','italic');
 
     % ----- 智能车分组 -----
     r = r + 1;
@@ -272,7 +273,7 @@ function handleSketchClick(fig, col, row)
     end
     S.sketchChain(end+1) = nodeIdx;      %#ok<AGROW>
     setS(fig, S);
-    drawSkeleton(fig);
+    refreshDisplay(fig);
     setStatus(fig, sprintf('已添加节点 #%d（折线内第 %d 点）', nodeIdx, numel(S.sketchChain)));
 end
 
@@ -299,7 +300,7 @@ function handleEraseClick(fig, col, row)
         % 清理孤立节点：删除不与任何 edge 相连的节点
         S = cleanupNodes(S);
         setS(fig, S);
-        drawSkeleton(fig);
+        refreshDisplay(fig);
         setStatus(fig, sprintf('已擦除线段（最近距离 %.1f 像素）', bestDist));
     else
         setStatus(fig, sprintf('未命中任何线段（最近 %.1f 像素），请靠近线段点击。', bestDist));
@@ -331,78 +332,94 @@ end
 %   骨架按钮回调
 %% ====================================================================
 function onBtnSketch(fig)
+    S = getS(fig); S.sketchChain = []; setS(fig, S);
+    setSketchState(fig, 'sketching');
+    setStatus(fig, '点选输入：左键画点，右键结束当前折线。');
+end
+
+function onBtnFinishSketch(fig)
     S = getS(fig);
-    S.mode = 'sketch';
-    S.sketchChain = [];
-    setS(fig, S);
-    setStatus(fig, '骨架提取模式：左键连续画点，右键结束当前折线。');
+    if isempty(S.sk.edges)
+        uialert(fig, '尚未画出任何道路骨架，请先用左键点击画线。', '提示'); return;
+    end
+    setStatus(fig, sprintf('正在生成道路掩膜（半宽=%d像素）...', S.roadHalfWidth));
+    drawnow;
+    S.roadMask = genRoadMask(S.sk.nodes, S.sk.edges, S.roadHalfWidth, S.mapW, S.mapH);
+    setS(fig, S); roadPx = sum(S.roadMask(:));
+    setSketchState(fig, 'finalized');
+    setStatus(fig, sprintf('提取完成！道路掩膜 %d 像素。', roadPx));
 end
 
 function onBtnErase(fig)
     S = getS(fig);
-    S.mode = 'erase';
-    setS(fig, S);
-    setStatus(fig, '擦除模式：点击/靠近要删除的线段（整条删除）。');
+    if strcmp(S.sketchState, 'erasing')
+        setSketchState(fig, 'sketching');
+        setStatus(fig, '已返回点选输入模式。');
+    else
+        if isempty(S.sk.edges)
+            uialert(fig, '尚无线段可擦除。', '提示'); return;
+        end
+        setSketchState(fig, 'erasing');
+        setStatus(fig, '擦除模式：点击要删除的线段（整条删除）。');
+    end
 end
 
 function onBtnClearSkeleton(fig)
     S = getS(fig);
-    S.sk.nodes = zeros(0,2);
-    S.sk.edges = zeros(0,2,'int32');
-    S.sketchChain = [];
-    S.mode = 'idle';
+    S.sk.nodes = zeros(0,2); S.sk.edges = zeros(0,2,'int32');
+    S.sketchChain = []; S.roadMask = [];
     setS(fig, S);
-    refreshView(fig);    % 恢复纯地图
-    setStatus(fig, '骨架已清空。');
+    setSketchState(fig, 'idle');
+    setStatus(fig, '道路已全部清空。');
 end
 
-function onBtnShowSkeleton(fig)
-    S = getS(fig);
-    S.mode = 'idle';
-    setS(fig, S);
-    drawSkeleton(fig);
-    setStatus(fig, sprintf('骨架已显示： %d 节点, %d 线段', ...
-              size(S.sk.nodes,1), size(S.sk.edges,1)));
+%% ==== State machine + road width ====
+function setSketchState(fig, newState)
+    S = getS(fig); S.sketchState = newState;
+    switch newState
+        case 'sketching', S.mode = 'sketch';
+        case 'erasing',   S.mode = 'erase';
+        otherwise,          S.mode = 'idle';
+    end
+    setS(fig, S); updateSketchButtons(fig, newState);
+    if strcmp(newState, 'erasing'), set(fig,'Pointer','circle');
+    else, set(fig,'Pointer','arrow'); end
+    updateModeLabel(fig, newState); refreshDisplay(fig);
 end
 
-%% ====================================================================
-%   道路掩膜相关回调（OR1 步骤C）
-%% ====================================================================
+function updateSketchButtons(fig, state)
+    S = getS(fig); h = S.handles;
+    switch state
+        case {'idle','finalized'}
+            h.btnSketch.Enable='on'; h.btnFinishSketch.Enable='off';
+            h.btnErase.Enable='off'; h.btnErase.Text='擦除道路';
+        case 'sketching'
+            h.btnSketch.Enable='on'; h.btnFinishSketch.Enable='on';
+            h.btnErase.Enable='on'; h.btnErase.Text='擦除道路';
+        case 'erasing'
+            h.btnSketch.Enable='on'; h.btnFinishSketch.Enable='on';
+            h.btnErase.Enable='on'; h.btnErase.Text='返回点选';
+    end
+end
+
+function updateModeLabel(fig, state)
+    S = getS(fig); lbl = S.handles.sketchModeLabel;
+    switch state
+        case 'idle',      lbl.Text='当前模式: 空闲'; lbl.FontColor=[0 .5 0];
+        case 'sketching', lbl.Text='当前模式: 点选输入'; lbl.FontColor=[.8 0 0];
+        case 'erasing',   lbl.Text='当前模式: 擦除'; lbl.FontColor=[.5 0 .5];
+        case 'finalized', lbl.Text='当前模式: 提取完成'; lbl.FontColor=[0 0 .8];
+    end
+end
+
 function onRoadWidthChanged(fig, src)
-    S = getS(fig);
-    S.roadHalfWidth = round(src.Value);
-    setS(fig, S);
-    if isfield(S.handles, 'roadWidthValue')
-        S.handles.roadWidthValue.Text = sprintf('当前: %d 像素', S.roadHalfWidth);
+    S = getS(fig); S.roadHalfWidth = round(src.Value); setS(fig, S);
+    S.handles.roadWidthValue.Text = sprintf('当前: %d 像素', S.roadHalfWidth);
+    if strcmp(S.sketchState, 'finalized') && ~isempty(S.sk.edges)
+        S = getS(fig);
+        S.roadMask = genRoadMask(S.sk.nodes, S.sk.edges, S.roadHalfWidth, S.mapW, S.mapH);
+        setS(fig, S); refreshDisplay(fig);
     end
-end
-
-function onBtnGenMask(fig)
-    S = getS(fig);
-    if isempty(S.sk.edges)
-        setStatus(fig, '无骨架！请先提取骨架再生成掩膜。');
-        uialert(fig, '请先点击"开始提取骨架"画出道路骨架，再生成掩膜。', '提示');
-        return;
-    end
-    setStatus(fig, sprintf('正在生成道路掩膜（半宽=%d像素）...', S.roadHalfWidth));
-    drawnow;   % 让状态栏立即刷新
-    S.roadMask = genRoadMask(S.sk.nodes, S.sk.edges, S.roadHalfWidth, S.mapW, S.mapH);
-    setS(fig, S);
-    roadPx = sum(S.roadMask(:));
-    setStatus(fig, sprintf('道路掩膜已生成： %d 像素（半宽=%d）。点击"显示道路区"查看。', ...
-              roadPx, S.roadHalfWidth));
-end
-
-function onBtnShowRoad(fig)
-    S = getS(fig);
-    if isempty(S.roadMask)
-        setStatus(fig, '请先点击"生成道路掩膜"。');
-        return;
-    end
-    S.mode = 'idle';
-    setS(fig, S);
-    drawRoadArea(fig);
-    setStatus(fig, sprintf('道路区已显示（半透明蓝色覆盖）。'));
 end
 
 function mask = genRoadMask(nodes, edges, halfWidth, mapW, mapH)
@@ -431,33 +448,6 @@ function mask = genRoadMask(nodes, edges, halfWidth, mapW, mapH)
             end
         end
     end
-end
-
-function drawRoadArea(fig)
-%DRAWROADAREA  在地图上半透明覆盖道路区（蓝色），叠加骨架，并应用当前旋转
-    S = getS(fig);
-    if isempty(S.mapOrigin) || isempty(S.roadMask), return; end
-    map = S.mapOrigin;
-    % 半透明蓝色覆盖：newColor = old*0.5 + blue*0.5
-    overlayR = 30; overlayG = 100; overlayB = 220;
-    m = S.roadMask;
-    R = double(map(:,:,1)); G = double(map(:,:,2)); B = double(map(:,:,3));
-    R(m) = R(m)*0.5 + overlayR*0.5;
-    G(m) = G(m)*0.5 + overlayG*0.5;
-    B(m) = B(m)*0.5 + overlayB*0.5;
-    map = uint8(cat(3, R, G, B));
-    % 叠加骨架（红/黄）
-    map = overlaySkeleton(map, S.sk.nodes, S.sk.edges, S.mapW, S.mapH);
-    % 应用旋转
-    if S.rotDeg ~= 0
-        S.mapDisplay = rotateMap(map, S.rotDeg);
-        S.rotSize = [size(S.mapDisplay,1), size(S.mapDisplay,2)];
-    else
-        S.mapDisplay = map;
-        S.rotSize = [];
-    end
-    setS(fig, S);
-    refreshView(fig);
 end
 
 function map = overlaySkeleton(map, nodes, edges, mapW, mapH)
@@ -491,16 +481,6 @@ function map = stampSquare(map, cx, cy, radius, color, W, H)
             end
         end
     end
-end
-
-function drawSkeletonOnMap(fig)
-%DRAWSKELETONONMAP  在当前 mapDisplay 上叠加骨架（不重置 mapDisplay）
-    S = getS(fig);
-    if isempty(S.mapDisplay), return; end
-    S.mapDisplay = overlaySkeleton(S.mapDisplay, S.sk.nodes, S.sk.edges, ...
-                                   S.mapW, S.mapH);
-    setS(fig, S);
-    refreshView(fig);
 end
 
 %% ====================================================================
@@ -538,48 +518,47 @@ function handleLoadIVClick(fig, col, row)
     S.nextIVid = S.nextIVid + 1;
     S.mode = 'idle';
     setS(fig, S);
-    drawAllVehicles(fig);
+    refreshDisplay(fig);
     updateIVDropdown(fig);
     [wx, wy] = px2world(fig, col, row);
     setStatus(fig, sprintf('车辆 #%d 已加载 @ (%.1f, %.1f)m，朝向 %.0f°', ...
               v.id, wx, wy, v.angle));
 end
 
-function composite = buildComposite(fig)
-%BUILDCOMPOSITE  构建完整叠加图（原图+骨架+车辆），不修改 mapDisplay，不刷新
-%  供 drawAllVehicles / 旋转 / 测量 共用，保证一致性
-    S = getS(fig);
-    composite = S.mapOrigin;
-    if isempty(composite), return; end
-    % 叠加骨架（粗实线）
-    if ~isempty(S.sk.edges)
-        composite = overlaySkeleton(composite, S.sk.nodes, S.sk.edges, ...
-                                    S.mapW, S.mapH);
+function map = buildBaseMap(fig)
+    S = getS(fig); map = S.mapOrigin;
+    if isempty(map), return; end
+    switch S.sketchState
+        case {'sketching','erasing'}
+            if ~isempty(S.sk.edges)
+                map = overlaySkeleton(map, S.sk.nodes, S.sk.edges, S.mapW, S.mapH);
+            end
+        case 'finalized'
+            if ~isempty(S.roadMask), map = overlayBlueRoad(map, S.roadMask); end
     end
-    % 叠加车辆
     for i = 1:numel(S.vehicles)
-        composite = drawIV(composite, ...
-            S.vehicles(i).cx, S.vehicles(i).cy, ...
-            S.vehicles(i).angle, S.vehicles(i).dispScale, ...
-            S.mapW, S.mapH, S.scale);
+        map = drawIV(map, S.vehicles(i).cx, S.vehicles(i).cy, ...
+            S.vehicles(i).angle, S.vehicles(i).dispScale, S.mapW, S.mapH, S.scale);
     end
 end
 
-function drawAllVehicles(fig)
-%DRAWALLVEHICLES  重绘地图（原图+骨架+所有车辆），考虑当前旋转角度
-    S = getS(fig);
-    if isempty(S.mapOrigin), return; end
-    composite = buildComposite(fig);
+function map = overlayBlueRoad(map, roadMask)
+    m = roadMask;
+    R = double(map(:,:,1)); G = double(map(:,:,2)); B = double(map(:,:,3));
+    R(m) = R(m)*0.5+15; G(m) = G(m)*0.5+50; B(m) = B(m)*0.5+110;
+    map = uint8(cat(3,R,G,B));
+end
+
+function refreshDisplay(fig)
+    S = getS(fig); if isempty(S.mapOrigin), return; end
+    map = buildBaseMap(fig);
     if S.rotDeg ~= 0
-        S = getS(fig);
-        S.mapDisplay = rotateMap(composite, S.rotDeg);
+        S = getS(fig); S.mapDisplay = rotateMap(map, S.rotDeg);
         S.rotSize = [size(S.mapDisplay,1), size(S.mapDisplay,2)];
     else
-        S.mapDisplay = composite;
-        S.rotSize = [];
+        S.mapDisplay = map; S.rotSize = [];
     end
-    setS(fig, S);
-    refreshView(fig);
+    setS(fig, S); refreshView(fig);
 end
 
 function mapOut = drawIV(mapIn, cx, cy, angleDeg, dispScale, mapW, mapH, scale)
@@ -686,7 +665,7 @@ function onBtnRemoveIV(fig)
     end
     S.vehicles(idx) = [];
     setS(fig, S);
-    drawAllVehicles(fig);
+    refreshDisplay(fig);
     updateIVDropdown(fig);
     setStatus(fig, sprintf('车辆 #%d 已移除。', rmId));
 end
@@ -704,7 +683,7 @@ function onAngleChanged(fig, src)
             if ~isempty(idx)
                 S.vehicles(idx).angle = src.Value;
                 setS(fig, S);
-                drawAllVehicles(fig);
+                refreshDisplay(fig);
             end
         end
     end
@@ -753,7 +732,7 @@ function onBtnClearMeasure(fig)
     S.mode = 'idle';
     S.measurePts = zeros(0,2);
     setS(fig, S);
-    drawAllVehicles(fig);   % 恢复到不含测量标记的视图
+    refreshDisplay(fig);   % 恢复到不含测量标记的视图
     setStatus(fig, '测量标记已清除。');
     S.handles.measureLabel.Text = '距离: ---';
 end
@@ -812,7 +791,7 @@ function drawMeasurement(fig)
     S = getS(fig);
     if isempty(S.mapOrigin), return; end
     % 1. 先构建复合图（原图+骨架+车辆）
-    map = buildComposite(fig);
+    map = buildBaseMap(fig);
     [H, W, ~] = size(map);
     % 2. 叠加测量标记（青色连线 + 品红节点）
     pts = S.measurePts;
@@ -866,7 +845,7 @@ function onRotChanged(fig, src)
     S.rotDeg = deg;
     setS(fig, S);
     % drawAllVehicles 会构建复合图并按 rotDeg 旋转（保证骨架/车辆一起转、不丢失）
-    drawAllVehicles(fig);
+    refreshDisplay(fig);
     setStatus(fig, sprintf('地图已旋转 %.0f°（手搓反向映射）。', deg));
 end
 
@@ -1005,23 +984,6 @@ function [col, row] = world2px(fig, wx, wy)
     col = wx / S.scale;
     row = S.mapH - wy / S.scale;
 end
-
-
-%% ====================================================================
-%   骨架绘制
-%% ====================================================================
-function drawSkeleton(fig)
-%DRAWSKELETON  在地图副本上手绘骨架（粗实红线 + 黄色节点），不考虑旋转
-    S = getS(fig);
-    if isempty(S.mapOrigin), return; end
-    S.mapDisplay = overlaySkeleton(S.mapOrigin, S.sk.nodes, S.sk.edges, ...
-                                   S.mapW, S.mapH);
-    S.rotDeg = 0;   % 显示骨架时回到 0°（绘制中不应处于旋转态）
-    S.rotSize = [];
-    setS(fig, S);
-    refreshView(fig);
-end
-
 
 %% ====================================================================
 %   几何 / 图形算法（手写）
