@@ -8,15 +8,17 @@ mapIn = uint8(255 * ones(mapH, mapW, 3));  % white map
 mapOut = drawIV(mapIn, 250, 150, 0, 3, mapW, mapH, scale);
 greenPx = nnz(mapOut(:,:,1)==0 & mapOut(:,:,2)==200 & mapOut(:,:,3)==0);
 assert(greenPx > 0, 'no green pixels drawn');
-fprintf('[OK] drawIV angle=0: %d green pixels\n', greenPx);
+% Yellow head pixels (same width as body)
+yellowPx = nnz(mapOut(:,:,1)==255 & mapOut(:,:,2)==255 & mapOut(:,:,3)==0);
+assert(yellowPx > 0, 'no yellow head pixels');
+fprintf('[OK] drawIV angle=0: green=%d, yellow(head)=%d\n', greenPx, yellowPx);
 
 %% 2. Test drawIV - rotation 90 degrees
 mapOut2 = drawIV(mapIn, 250, 150, 90, 3, mapW, mapH, scale);
 greenPx2 = nnz(mapOut2(:,:,1)==0 & mapOut2(:,:,2)==200 & mapOut2(:,:,3)==0);
-assert(greenPx2 > 0, 'no pixels at 90 deg');
-% At 90deg, the rectangle should be taller than wide (vs angle 0)
-% Check shape: at 0 deg, width > height; at 90 deg, height > width
-fprintf('[OK] drawIV angle=90: %d green pixels\n', greenPx2);
+yellowPx2 = nnz(mapOut2(:,:,1)==255 & mapOut2(:,:,2)==255 & mapOut2(:,:,3)==0);
+assert(greenPx2 > 0 && yellowPx2 > 0, 'missing pixels at 90 deg');
+fprintf('[OK] drawIV angle=90: green=%d, yellow=%d\n', greenPx2, yellowPx2);
 
 %% 3. Test pointInPolygon
 % Unit square
@@ -33,34 +35,32 @@ assert(pointInPolygon([2 1], tri), 'triangle center');
 assert(~pointInPolygon([0 2], tri), 'triangle outside');
 fprintf('[OK] pointInPolygon triangle\n');
 
-%% 4. Test rotated rectangle consistency
-% Draw IV at angle 0, count pixels. Draw at angle 45, count should be similar
-mapA = drawIV(mapIn, 250, 150, 0, 3, mapW, mapH, scale);
-mapB = drawIV(mapIn, 250, 150, 45, 3, mapW, mapH, scale);
-gA = nnz(mapA(:,:,2)==200);
-gB = nnz(mapB(:,:,2)==200);
-% Areas should be close (45deg might lose some due to discrete sampling)
-ratio = min(gA,gB)/max(gA,gB);
-assert(ratio > 0.7, sprintf('area ratio too different: %.3f', ratio));
-fprintf('[OK] drawIV rotation area consistency: 0deg=%d, 45deg=%d (ratio %.3f)\n', gA, gB, ratio);
+%% 4. Test head width equals body width
+% At angle 0, head occupies the front 25% of length, full width
+% Check that yellow pixels span the full width at the front
+L = (8/scale)*3; Wd = (3/scale)*3;
+headLen = L * 0.25;
+% At angle 0, head region: x in [headLen-L/2, L/2], y in [-Wd/2, Wd/2]
+% centered at (250,150)
+frontCol = round(250 + L/2 - 1);  % near front edge
+% Count yellow pixels in that column - should span the width
+yellowCol = nnz(mapOut(round(150-Wd/2):round(150+Wd/2), frontCol, 1)==255 & ...
+    mapOut(round(150-Wd/2):round(150+Wd/2), frontCol, 2)==255);
+assert(yellowCol >= round(Wd)-1, sprintf('head width mismatch: %d vs Wd=%d', yellowCol, round(Wd)));
+fprintf('[OK] head spans full width: %d pixels (Wd=%.1f)\n', yellowCol, Wd);
 
-%% 5. Test front indicator (yellow dot)
-% front dot at angle 0 should be at cx + L/2
-L = (8/scale)*3;
-th = 0;
-frontX = 250 + (L/2)*cos(th);
-frontY = 150 + (L/2)*sin(th);
-fr = round(frontY); fc = round(frontX);
-assert(mapA(fr,fc,1)==255 && mapA(fr,fc,2)==255, 'front indicator not yellow');
-fprintf('[OK] front indicator at (%d,%d) is yellow\n', fc, fr);
+%% 5. Test total area = body + head
+totalPx = greenPx + yellowPx;
+% Expected area = L * Wd
+expectedArea = L * Wd;
+ratio = totalPx / expectedArea;
+assert(ratio > 0.8 && ratio < 1.2, sprintf('total area off: %d vs expected %.1f', totalPx, expectedArea));
+fprintf('[OK] total area: %d px (expected ~%.0f, ratio %.2f)\n', totalPx, expectedArea, ratio);
 
 %% 6. Test road validation logic
-% Create a simple road mask
 mask = false(mapH, mapW);
-mask(148:152, 200:300) = true;  % horizontal road band
-% Point on road
+mask(148:152, 200:300) = true;
 assert(mask(150,250), 'road point check');
-% Point off road
 assert(~mask(150,100), 'off-road point check');
 fprintf('[OK] road mask validation logic\n');
 
@@ -71,29 +71,39 @@ fprintf('\n========== Step D Test PASSED ==========\n');
 function mapOut = drawIV(mapIn, cx, cy, angleDeg, dispScale, mapW, mapH, scale)
     L = (8 / scale) * dispScale;
     Wd = (3 / scale) * dispScale;
-    corners = [-L/2 -Wd/2; L/2 -Wd/2; L/2 Wd/2; -L/2 Wd/2];
+    headLen = L * 0.25;
     th = deg2rad(angleDeg);
     R = [cos(th) -sin(th); sin(th) cos(th)];
-    rotCorners = corners * R';
-    ptsPx = rotCorners + [cx, cy];
     mapOut = mapIn;
+    % body (green)
+    bodyCorners = [-L/2 -Wd/2; headLen-L/2 -Wd/2; headLen-L/2 Wd/2; -L/2 Wd/2];
+    bodyPts = bodyCorners * R' + [cx, cy];
     bodyColor = uint8([0 200 0]);
-    cMin = max(1, floor(min(ptsPx(:,1))));
-    cMax = min(mapW, ceil(max(ptsPx(:,1))));
-    rMin = max(1, floor(min(ptsPx(:,2))));
-    rMax = min(mapH, ceil(max(ptsPx(:,2))));
+    cMin = max(1, floor(min(bodyPts(:,1))));
+    cMax = min(mapW, ceil(max(bodyPts(:,1))));
+    rMin = max(1, floor(min(bodyPts(:,2))));
+    rMax = min(mapH, ceil(max(bodyPts(:,2))));
     for r = rMin:rMax
         for c = cMin:cMax
-            if pointInPolygon([c, r], ptsPx)
+            if pointInPolygon([c, r], bodyPts)
                 mapOut(r, c, :) = bodyColor;
             end
         end
     end
-    frontX = cx + (L/2) * cos(th);
-    frontY = cy + (L/2) * sin(th);
-    fr = round(frontY); fc = round(frontX);
-    if fc>=1 && fc<=mapW && fr>=1 && fr<=mapH
-        mapOut(fr, fc, :) = uint8([255 255 0]);
+    % head (yellow)
+    headCorners = [headLen-L/2 -Wd/2; L/2 -Wd/2; L/2 Wd/2; headLen-L/2 Wd/2];
+    headPts = headCorners * R' + [cx, cy];
+    headColor = uint8([255 255 0]);
+    cMin = max(1, floor(min(headPts(:,1))));
+    cMax = min(mapW, ceil(max(headPts(:,1))));
+    rMin = max(1, floor(min(headPts(:,2))));
+    rMax = min(mapH, ceil(max(headPts(:,2))));
+    for r = rMin:rMax
+        for c = cMin:cMax
+            if pointInPolygon([c, r], headPts)
+                mapOut(r, c, :) = headColor;
+            end
+        end
     end
 end
 

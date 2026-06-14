@@ -586,38 +586,53 @@ end
 function mapOut = drawIV(mapIn, cx, cy, angleDeg, dispScale, mapW, mapH, scale)
 %DRAWIV  手搓绘制单辆 IV（旋转矩形）到地图矩阵上
 %  真实 IV: 8m x 3m -> 像素 8/1.7 x 3/1.7 ≈ 4.7 x 1.8 -> x dispScale
+%  车身为绿色，车头前段为黄色（与车身同宽）
     L = (8 / scale) * dispScale;   % 长（像素）
     Wd = (3 / scale) * dispScale;  % 宽（像素）
-    % 局部坐标角点 [x, y]（长边沿 X 轴）
-    corners = [-L/2 -Wd/2; L/2 -Wd/2; L/2 Wd/2; -L/2 Wd/2];
-    % 旋转矩阵（手写）
+    headLen = L * 0.25;            % 车头长度（占全长 1/4）
+    bodyLen = L - headLen;         % 车身长度
     th = deg2rad(angleDeg);
     R = [cos(th) -sin(th); sin(th) cos(th)];
-    rotCorners = corners * R';   % 旋转
-    % 平移到 (cx, cy) -> 像素坐标 [col, row]
-    ptsPx = rotCorners + [cx, cy];
-    % 用扫描线填充多边形（手写）
+
+    % —— 1. 画车身（绿色）：从中心偏后 headLen/2 开始 ——
+    bodyCorners = [-(bodyLen/2 + headLen/2) -Wd/2; ...
+                    (headLen - (bodyLen/2 + headLen/2)) -Wd/2; ...
+                    (headLen - (bodyLen/2 + headLen/2))  Wd/2; ...
+                   -(bodyLen/2 + headLen/2)  Wd/2];
+    % 简化：车身后端 x = -L/2，前端 x = -L/2 + bodyLen = headLen - L/2
+    bodyCorners = [-L/2 -Wd/2; headLen-L/2 -Wd/2; headLen-L/2 Wd/2; -L/2 Wd/2];
+    bodyPts = bodyCorners * R' + [cx, cy];
     mapOut = mapIn;
-    bodyColor = uint8([0 200 0]);   % 绿色车体
-    % 计算 bounding box
-    cMin = max(1, floor(min(ptsPx(:,1))));
-    cMax = min(mapW, ceil(max(ptsPx(:,1))));
-    rMin = max(1, floor(min(ptsPx(:,2))));
-    rMax = min(mapH, ceil(max(ptsPx(:,2))));
+    bodyColor = uint8([0 200 0]);   % 绿色车身
+    [cMin, cMax, rMin, rMax] = polyBBox(bodyPts, mapW, mapH);
     for r = rMin:rMax
         for c = cMin:cMax
-            if pointInPolygon([c, r], ptsPx)
+            if pointInPolygon([c, r], bodyPts)
                 mapOut(r, c, :) = bodyColor;
             end
         end
     end
-    % 画车头指示（前方向画一个亮色点）
-    frontX = cx + (L/2) * cos(th);
-    frontY = cy + (L/2) * sin(th);
-    fr = round(frontY); fc = round(frontX);
-    if fc>=1 && fc<=mapW && fr>=1 && fr<=mapH
-        mapOut(fr, fc, :) = uint8([255 255 0]);
+
+    % —— 2. 画车头（黄色）：前端段，与车身同宽 ——
+    headCorners = [headLen-L/2 -Wd/2; L/2 -Wd/2; L/2 Wd/2; headLen-L/2 Wd/2];
+    headPts = headCorners * R' + [cx, cy];
+    headColor = uint8([255 255 0]); % 黄色车头
+    [cMin, cMax, rMin, rMax] = polyBBox(headPts, mapW, mapH);
+    for r = rMin:rMax
+        for c = cMin:cMax
+            if pointInPolygon([c, r], headPts)
+                mapOut(r, c, :) = headColor;
+            end
+        end
     end
+end
+
+function [cMin, cMax, rMin, rMax] = polyBBox(ptsPx, mapW, mapH)
+%POLYBBOX  计算多边形的像素 bounding box（钳制到地图范围）
+    cMin = max(1, floor(min(ptsPx(:,1))));
+    cMax = min(mapW, ceil(max(ptsPx(:,1))));
+    rMin = max(1, floor(min(ptsPx(:,2))));
+    rMax = min(mapH, ceil(max(ptsPx(:,2))));
 end
 
 function inside = pointInPolygon(pt, poly)
