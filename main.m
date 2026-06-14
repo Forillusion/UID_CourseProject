@@ -113,11 +113,23 @@ function h = buildPanel(pnl, fig)
     h.rotEdit = addC('editfield', r, 'numeric', 'Value',0, 'Limits',[-360 360], ...
                      'ValueChangedFcn', @(s,e) onRotChanged(fig,s));
 
-    % ----- 骨架分组（步骤 B 填充） -----
+    % ----- 骨架分组 (OR1) -----
     r = r + 1;
     addC('label', r, 'Text','──── 道路骨架 (OR1) ────', 'FontSize',11, 'FontWeight','bold');
     r = r + 1;
-    addC('label', r, 'Text','(步骤B 实现)', 'FontSize',8, 'FontAngle','italic');
+    h.btnSketch = addC('button', r, 'Text','开始提取骨架', ...
+                       'ButtonPushedFcn', @(s,e) onBtnSketch(fig));
+    r = r + 1;
+    h.btnErase = addC('button', r, 'Text','擦除线段', ...
+                      'ButtonPushedFcn', @(s,e) onBtnErase(fig));
+    r = r + 1;
+    h.btnClearSkeleton = addC('button', r, 'Text','清空骨架', ...
+                              'ButtonPushedFcn', @(s,e) onBtnClearSkeleton(fig));
+    r = r + 1;
+    h.btnShowSkeleton = addC('button', r, 'Text','显示/刷新骨架', ...
+                             'ButtonPushedFcn', @(s,e) onBtnShowSkeleton(fig));
+    r = r + 1;
+    addC('label', r, 'Text','提示: sketch模式 左键画点/右键结束折线', 'FontSize',8, 'FontAngle','italic');
 
     % ----- 智能车分组（占位） -----
     r = r + 1;
@@ -149,22 +161,152 @@ end
 %   鼠标交互（本步骤：仅显示坐标）
 %% ====================================================================
 function onMouseDown(fig, ~)
+%ONMOUSEDOWN  主鼠标按下回调，按 mode + 按键类型分发
     S = getS(fig);
     if isempty(S.mapOrigin), return; end
     pt = getPointerOnAxes(fig, S.ax);
     if isempty(pt), return; end
     col = pt(1); row = pt(2);
+    selType = get(fig, 'SelectionType');   % 'normal'=左键 'alt'=右键
+
+    % 始终更新坐标显示
     [wx, wy] = px2world(fig, col, row);
-    % 更新面板坐标显示
-    S = getS(fig);
     if isfield(S,'handles')
-        set(S.handles.coordX, 'String', sprintf('X: %.2f m', wx));
-        set(S.handles.coordY, 'String', sprintf('Y: %.2f m', wy));
+        try
+            S.handles.coordX.Text = sprintf('X: %.2f m', wx);
+            S.handles.coordY.Text = sprintf('Y: %.2f m', wy);
+        catch; end
+    end
+
+    % 按模式分发
+    switch S.mode
+        case 'sketch'
+            if strcmp(selType, 'alt')      % 右键：结束当前折线
+                S.sketchChain = [];
+                setS(fig, S);
+                setStatus(fig, '折线已结束，可开始新的折线（左键画点）。');
+            else                            % 左键：添加节点
+                handleSketchClick(fig, col, row);
+            end
+        case 'erase'
+            handleEraseClick(fig, col, row);
+        otherwise
+            % idle：仅显示坐标，已在上面处理
     end
 end
 
 function onMouseUp(fig, ~)
     % 预留：拖拽相关
+end
+
+
+%% ====================================================================
+%   骨架交互处理
+%% ====================================================================
+function handleSketchClick(fig, col, row)
+%HANDLESKETCHCLICK  sketch 模式下左键添加节点并连接
+    S = getS(fig);
+    % 追加新节点
+    S.sk.nodes(end+1, :) = [col, row];   %#ok<AGROW>
+    nodeIdx = size(S.sk.nodes, 1);
+    % 如果当前折线非空，连接上一节点
+    if ~isempty(S.sketchChain)
+        prev = S.sketchChain(end);
+        S.sk.edges(end+1, :) = [prev, nodeIdx];  %#ok<AGROW>
+    end
+    S.sketchChain(end+1) = nodeIdx;      %#ok<AGROW>
+    setS(fig, S);
+    drawSkeleton(fig);
+    setStatus(fig, sprintf('已添加节点 #%d（折线内第 %d 点）', nodeIdx, numel(S.sketchChain)));
+end
+
+function handleEraseClick(fig, col, row)
+%HANDLEERASECLICK  erase 模式下删除离点击点最近的整条线段
+    S = getS(fig);
+    if isempty(S.sk.edges)
+        setStatus(fig, '无骨架可擦除。');
+        return;
+    end
+    P = [col, row];
+    threshold = 6;   % 像素，命中阈值
+    bestIdx = 0; bestDist = inf;
+    for i = 1:size(S.sk.edges, 1)
+        ni = S.sk.edges(i, 1); nj = S.sk.edges(i, 2);
+        A = S.sk.nodes(ni, :); B = S.sk.nodes(nj, :);
+        d = ptToSegDist(P, A, B);
+        if d < bestDist
+            bestDist = d; bestIdx = i;
+        end
+    end
+    if bestIdx > 0 && bestDist < threshold
+        S.sk.edges(bestIdx, :) = [];   % 删除该边
+        % 清理孤立节点：删除不与任何 edge 相连的节点
+        S = cleanupNodes(S);
+        setS(fig, S);
+        drawSkeleton(fig);
+        setStatus(fig, sprintf('已擦除线段（最近距离 %.1f 像素）', bestDist));
+    else
+        setStatus(fig, sprintf('未命中任何线段（最近 %.1f 像素），请靠近线段点击。', bestDist));
+    end
+end
+
+function S = cleanupNodes(S)
+%CLEANUPNODES  删除孤立节点并重映射 edge 索引
+    nNodes = size(S.sk.nodes, 1);
+    if nNodes == 0, return; end
+    used = false(nNodes, 1);
+    if ~isempty(S.sk.edges)
+        used(S.sk.edges(:)) = true;
+    end
+    keepIdx = find(used);
+    % 建立旧索引 -> 新索引的映射表
+    newMap = zeros(nNodes, 1);
+    newMap(keepIdx) = 1:numel(keepIdx);
+    % 重映射 edges
+    if ~isempty(S.sk.edges)
+        S.sk.edges(:,1) = newMap(S.sk.edges(:,1));
+        S.sk.edges(:,2) = newMap(S.sk.edges(:,2));
+    end
+    S.sk.nodes = S.sk.nodes(keepIdx, :);
+end
+
+
+%% ====================================================================
+%   骨架按钮回调
+%% ====================================================================
+function onBtnSketch(fig)
+    S = getS(fig);
+    S.mode = 'sketch';
+    S.sketchChain = [];
+    setS(fig, S);
+    setStatus(fig, '骨架提取模式：左键连续画点，右键结束当前折线。');
+end
+
+function onBtnErase(fig)
+    S = getS(fig);
+    S.mode = 'erase';
+    setS(fig, S);
+    setStatus(fig, '擦除模式：点击/靠近要删除的线段（整条删除）。');
+end
+
+function onBtnClearSkeleton(fig)
+    S = getS(fig);
+    S.sk.nodes = zeros(0,2);
+    S.sk.edges = zeros(0,2,'int32');
+    S.sketchChain = [];
+    S.mode = 'idle';
+    setS(fig, S);
+    refreshView(fig);    % 恢复纯地图
+    setStatus(fig, '骨架已清空。');
+end
+
+function onBtnShowSkeleton(fig)
+    S = getS(fig);
+    S.mode = 'idle';
+    setS(fig, S);
+    drawSkeleton(fig);
+    setStatus(fig, sprintf('骨架已显示： %d 节点, %d 线段', ...
+              size(S.sk.nodes,1), size(S.sk.edges,1)));
 end
 
 function onResize(fig, ~)
@@ -259,4 +401,89 @@ function [col, row] = world2px(fig, wx, wy)
     S = getS(fig);
     col = wx / S.scale;
     row = S.mapH - wy / S.scale;
+end
+
+
+%% ====================================================================
+%   骨架绘制
+%% ====================================================================
+function drawSkeleton(fig)
+%DRAWSKELETON  在地图副本上手绘骨架（红色线段 + 黄色节点）
+    S = getS(fig);
+    if isempty(S.mapOrigin), return; end
+    S.mapDisplay = S.mapOrigin;   % 从原图重新复制
+
+    % —— 画线段（红色）——
+    lineColor = uint8([255 0 0]);
+    for i = 1:size(S.sk.edges, 1)
+        ni = S.sk.edges(i,1); nj = S.sk.edges(i,2);
+        A = S.sk.nodes(ni,:); B = S.sk.nodes(nj,:);
+        pxs = bresenham(A(1), A(2), B(1), B(2));
+        for k = 1:size(pxs,1)
+            c = pxs(k,1); r = pxs(k,2);
+            if c>=1 && c<=S.mapW && r>=1 && r<=S.mapH
+                S.mapDisplay(r, c, :) = lineColor;
+            end
+        end
+    end
+
+    % —— 画节点（黄色 3x3 方块）——
+    nodeColor = uint8([255 255 0]);
+    for i = 1:size(S.sk.nodes, 1)
+        c = round(S.sk.nodes(i,1)); r = round(S.sk.nodes(i,2));
+        for dr = -1:1
+            for dc = -1:1
+                rr = r+dr; cc = c+dc;
+                if cc>=1 && cc<=S.mapW && rr>=1 && rr<=S.mapH
+                    S.mapDisplay(rr, cc, :) = nodeColor;
+                end
+            end
+        end
+    end
+
+    setS(fig, S);
+    refreshView(fig);
+end
+
+
+%% ====================================================================
+%   几何 / 图形算法（手写）
+%% ====================================================================
+function d = ptToSegDist(P, A, B)
+%PTTOSEGDIST  点 P 到线段 AB 的最短距离
+    AB = B - A;
+    AP = P - A;
+    ab2 = dot(AB, AB);
+    if ab2 == 0
+        d = norm(P - A);
+        return;
+    end
+    t = dot(AP, AB) / ab2;
+    t = max(0, min(1, t));          % 钳制到 [0,1]，保证投影落在线段上
+    closest = A + t * AB;
+    d = norm(P - closest);
+end
+
+function pts = bresenham(x0, y0, x1, y1)
+%BRESENHAM  经典 Bresenham 直线算法，返回线上所有像素 [col row]
+    x0 = round(x0); y0 = round(y0); x1 = round(x1); y1 = round(y1);
+    dx = abs(x1 - x0); dy = abs(y1 - y0);
+    sx = sign(x1 - x0); sy = sign(y1 - y0);
+    if sx == 0, sx = 1; end
+    if sy == 0, sy = 1; end
+    err = dx - dy;
+    pts = zeros(0, 2);
+    while true
+        pts(end+1, :) = [x0, y0];   %#ok<AGROW>
+        if x0 == x1 && y0 == y1, break; end
+        e2 = 2 * err;
+        if e2 > -dy
+            err = err - dy;
+            x0 = x0 + sx;
+        end
+        if e2 < dx
+            err = err + dx;
+            y0 = y0 + sy;
+        end
+    end
 end
