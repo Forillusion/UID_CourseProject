@@ -145,11 +145,33 @@ function h = buildPanel(pnl, fig)
     r = r + 1;
     addC('label', r, 'Text','提示: sketch模式 左键画点/右键结束折线', 'FontSize',8, 'FontAngle','italic');
 
-    % ----- 智能车分组（占位） -----
+    % ----- 智能车分组 -----
     r = r + 1;
     addC('label', r, 'Text','──── 智能车 ────', 'FontSize',11, 'FontWeight','bold');
     r = r + 1;
-    addC('label', r, 'Text','(步骤D 实现)', 'FontSize',8, 'FontAngle','italic');
+    h.btnLoadIV = addC('button', r, 'Text','加载车辆', ...
+                       'ButtonPushedFcn', @(s,e) onBtnLoadIV(fig));
+    r = r + 1;
+    h.btnRemoveIV = addC('button', r, 'Text','移除车辆', ...
+                         'ButtonPushedFcn', @(s,e) onBtnRemoveIV(fig));
+    r = r + 1;
+    addC('label', r, 'Text','选择车辆:', 'FontSize',9);
+    r = r + 1;
+    h.ivDropdown = addC('dropdown', r, 'Items', {'(无车辆)'}, ...
+                        'Value', '(无车辆)');
+    r = r + 1;
+    addC('label', r, 'Text','朝向调整(度):', 'FontSize',9);
+    r = r + 1;
+    h.angleSlider = addC('slider', r, 'Value',0, 'Limits',[0 360], ...
+                         'MajorTicks',[0 90 180 270 360], ...
+                         'ValueChangedFcn', @(s,e) onAngleChanged(fig,s));
+    r = r + 1;
+    h.angleValue = addC('label', r, 'Text','当前: 0°', 'FontSize',9);
+    r = r + 1;
+    h.btnReportIV = addC('button', r, 'Text','报告位置', ...
+                         'ButtonPushedFcn', @(s,e) onBtnReportIV(fig));
+    r = r + 1;
+    addC('label', r, 'Text','提示: 加载前请先生成道路掩膜', 'FontSize',8, 'FontAngle','italic');
 
     % ----- 测量分组（占位） -----
     r = r + 1;
@@ -204,6 +226,8 @@ function onMouseDown(fig, ~)
             end
         case 'erase'
             handleEraseClick(fig, col, row);
+        case 'loadIV'
+            handleLoadIVClick(fig, col, row);
         otherwise
             % idle：仅显示坐标，已在上面处理
     end
@@ -440,6 +464,215 @@ function drawSkeletonOnMap(fig)
     end
     setS(fig, S);
     refreshView(fig);
+end
+
+%% ====================================================================
+%   智能车 (IV) 相关
+%% ====================================================================
+function handleLoadIVClick(fig, col, row)
+%HANDLELOADIVCLICK  loadIV 模式下点击地图加载车辆
+    S = getS(fig);
+    % 道路校验：必须有 roadMask
+    if isempty(S.roadMask)
+        setStatus(fig, '请先生成道路掩膜，再加载车辆。');
+        uialert(S.fig, '请先点击"生成道路掩膜"。', '提示');
+        return;
+    end
+    rc = round(row); cc = round(col);
+    if rc < 1 || rc > S.mapH || cc < 1 || cc > S.mapW
+        setStatus(fig, '点击点超出地图范围。');
+        return;
+    end
+    if ~S.roadMask(rc, cc)
+        setStatus(fig, sprintf('无效点 (%.0f,%.0f)：不在道路上！', col, row));
+        uialert(S.fig, '该点不在道路上，无法加载车辆。', '加载失败');
+        return;
+    end
+    % 有效：添加车辆
+    angle = 0;
+    if isfield(S.handles,'angleSlider') && isvalid(S.handles.angleSlider)
+        angle = S.handles.angleSlider.Value;
+    end
+    v.id = S.nextIVid;
+    v.cx = col; v.cy = row;
+    v.angle = angle;
+    v.dispScale = 3;   % 显示放大倍数（真实尺寸太小）
+    S.vehicles(end+1) = v;   %#ok<AGROW>
+    S.nextIVid = S.nextIVid + 1;
+    S.mode = 'idle';
+    setS(fig, S);
+    drawAllVehicles(fig);
+    updateIVDropdown(fig);
+    [wx, wy] = px2world(fig, col, row);
+    setStatus(fig, sprintf('车辆 #%d 已加载 @ (%.1f, %.1f)m，朝向 %.0f°', ...
+              v.id, wx, wy, v.angle));
+end
+
+function drawAllVehicles(fig)
+%DRAWALLVEHICLES  重绘地图（原图+骨架+所有车辆）
+    S = getS(fig);
+    if isempty(S.mapOrigin), return; end
+    S.mapDisplay = S.mapOrigin;
+    setS(fig, S);
+    % 叠加骨架（如果有的话）
+    if ~isempty(S.sk.edges)
+        drawSkeletonOnMap(fig);
+    end
+    % 叠加每辆车
+    S = getS(fig);
+    for i = 1:numel(S.vehicles)
+        S.mapDisplay = drawIV(S.mapDisplay, ...
+            S.vehicles(i).cx, S.vehicles(i).cy, ...
+            S.vehicles(i).angle, S.vehicles(i).dispScale, ...
+            S.mapW, S.mapH, S.scale);
+    end
+    setS(fig, S);
+    refreshView(fig);
+end
+
+function mapOut = drawIV(mapIn, cx, cy, angleDeg, dispScale, mapW, mapH, scale)
+%DRAWIV  手搓绘制单辆 IV（旋转矩形）到地图矩阵上
+%  真实 IV: 8m x 3m -> 像素 8/1.7 x 3/1.7 ≈ 4.7 x 1.8 -> x dispScale
+    L = (8 / scale) * dispScale;   % 长（像素）
+    Wd = (3 / scale) * dispScale;  % 宽（像素）
+    % 局部坐标角点 [x, y]（长边沿 X 轴）
+    corners = [-L/2 -Wd/2; L/2 -Wd/2; L/2 Wd/2; -L/2 Wd/2];
+    % 旋转矩阵（手写）
+    th = deg2rad(angleDeg);
+    R = [cos(th) -sin(th); sin(th) cos(th)];
+    rotCorners = corners * R';   % 旋转
+    % 平移到 (cx, cy) -> 像素坐标 [col, row]
+    ptsPx = rotCorners + [cx, cy];
+    % 用扫描线填充多边形（手写）
+    mapOut = mapIn;
+    bodyColor = uint8([0 200 0]);   % 绿色车体
+    % 计算 bounding box
+    cMin = max(1, floor(min(ptsPx(:,1))));
+    cMax = min(mapW, ceil(max(ptsPx(:,1))));
+    rMin = max(1, floor(min(ptsPx(:,2))));
+    rMax = min(mapH, ceil(max(ptsPx(:,2))));
+    for r = rMin:rMax
+        for c = cMin:cMax
+            if pointInPolygon([c, r], ptsPx)
+                mapOut(r, c, :) = bodyColor;
+            end
+        end
+    end
+    % 画车头指示（前方向画一个亮色点）
+    frontX = cx + (L/2) * cos(th);
+    frontY = cy + (L/2) * sin(th);
+    fr = round(frontY); fc = round(frontX);
+    if fc>=1 && fc<=mapW && fr>=1 && fr<=mapH
+        mapOut(fr, fc, :) = uint8([255 255 0]);
+    end
+end
+
+function inside = pointInPolygon(pt, poly)
+%POINTINPOLYGON  射线法判断点是否在多边形内（手写）
+    n = size(poly, 1);
+    inside = false;
+    j = n;
+    for i = 1:n
+        yi = poly(i,2); yj = poly(j,2);
+        xi = poly(i,1); xj = poly(j,1);
+        if ((yi > pt(2)) ~= (yj > pt(2)))
+            xCross = xi + (pt(2)-yi)/(yj-yi) * (xj-xi);
+            if pt(1) < xCross
+                inside = ~inside;
+            end
+        end
+        j = i;
+    end
+end
+
+function updateIVDropdown(fig)
+%UPDATEIVDROPDOWN  更新车辆下拉列表
+    S = getS(fig);
+    items = {'(无车辆)'};
+    if ~isempty(S.vehicles)
+        items = arrayfun(@(v) sprintf('#%d (%.0f,%.0f)', v.id, v.cx, v.cy), ...
+                         S.vehicles, 'UniformOutput', false);
+    end
+    dd = S.handles.ivDropdown;
+    dd.Items = items;
+    if ~isempty(S.vehicles)
+        dd.Value = items{end};
+    else
+        dd.Value = '(无车辆)';
+    end
+end
+
+function onBtnLoadIV(fig)
+    S = getS(fig);
+    if isempty(S.roadMask)
+        uialert(fig, '请先提取骨架并生成道路掩膜，再加载车辆。', '提示');
+        return;
+    end
+    S.mode = 'loadIV';
+    setS(fig, S);
+    setStatus(fig, '加载车辆模式：点击地图上道路区域放置车辆。');
+end
+
+function onBtnRemoveIV(fig)
+    S = getS(fig);
+    if isempty(S.vehicles)
+        setStatus(fig, '无车辆可移除。');
+        return;
+    end
+    sel = S.handles.ivDropdown.Value;
+    % 解析 "#id ..."
+    tok = regexp(sel, '^#(\d+)', 'match', 'once');
+    if isempty(tok)
+        setStatus(fig, '请先在下拉框选择要移除的车辆。');
+        return;
+    end
+    rmId = str2double(regexp(sel, '#(\d+)', 'tokens', 'once'));
+    idx = find(arrayfun(@(v) v.id==rmId, S.vehicles), 1);
+    if isempty(idx)
+        setStatus(fig, '未找到该车辆。');
+        return;
+    end
+    S.vehicles(idx) = [];
+    setS(fig, S);
+    drawAllVehicles(fig);
+    updateIVDropdown(fig);
+    setStatus(fig, sprintf('车辆 #%d 已移除。', rmId));
+end
+
+function onAngleChanged(fig, src)
+    S = getS(fig);
+    S.handles.angleValue.Text = sprintf('当前: %.0f°', src.Value);
+    % 如果有选中的车辆，更新其角度并重绘
+    if ~isempty(S.vehicles)
+        sel = S.handles.ivDropdown.Value;
+        tok = regexp(sel, '#(\d+)', 'tokens', 'once');
+        if ~isempty(tok)
+            id = str2double(tok{1});
+            idx = find(arrayfun(@(v) v.id==id, S.vehicles), 1);
+            if ~isempty(idx)
+                S.vehicles(idx).angle = src.Value;
+                setS(fig, S);
+                drawAllVehicles(fig);
+            end
+        end
+    end
+end
+
+function onBtnReportIV(fig)
+    S = getS(fig);
+    if isempty(S.vehicles)
+        setStatus(fig, '无车辆。');
+        return;
+    end
+    lines = cell(numel(S.vehicles),1);
+    for i = 1:numel(S.vehicles)
+        [wx, wy] = px2world(fig, S.vehicles(i).cx, S.vehicles(i).cy);
+        lines{i} = sprintf('车辆 #%d: 位置(%.1f, %.1f)m  朝向 %.0f°', ...
+                           S.vehicles(i).id, wx, wy, S.vehicles(i).angle);
+    end
+    msg = strjoin(lines, newline);
+    uialert(fig, msg, '所有车辆位置报告');
+    setStatus(fig, sprintf('已报告 %d 辆车的位置。', numel(S.vehicles)));
 end
 
 function onResize(fig, ~)
