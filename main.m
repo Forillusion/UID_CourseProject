@@ -113,7 +113,7 @@ function h = buildPanel(pnl, fig)
     r = r + 1;
     addC('label', r, 'Text','──── 地图 ────', 'FontSize',11, 'FontWeight','bold');
     r = r + 1;
-    h.rotLabel = addC('label', r, 'Text','旋转角度 (度): 0');
+    h.rotLabel = addC('label', r, 'Text','(有bug)旋转角度 (度): 0');
     r = r + 1;
     h.rotSlider = addC('slider', r, 'Value',0, 'Limits',[-180 180], ...
                        'MajorTicks',[-180 -90 0 90 180], ...
@@ -296,11 +296,16 @@ function handleEraseClick(fig, col, row)
         end
     end
     if bestIdx > 0 && bestDist < threshold
+        % 记录被删除线段的两端节点坐标（在重映射前）
+        ni_old = S.sk.edges(bestIdx, 1); nj_old = S.sk.edges(bestIdx, 2);
+        A_old = S.sk.nodes(ni_old, :); B_old = S.sk.nodes(nj_old, :);
         S.sk.edges(bestIdx, :) = [];   % 删除该边
-        % 清理孤立节点：删除不与任何 edge 相连的节点
         S = cleanupNodes(S);
+        % 删除位于该线段上的车辆（点到线段距离 < roadHalfWidth）
+        S = removeVehiclesOnEdge(S, A_old, B_old);
         setS(fig, S);
         refreshDisplay(fig);
+        updateIVDropdown(fig);
         setStatus(fig, sprintf('已擦除线段（最近距离 %.1f 像素）', bestDist));
     else
         setStatus(fig, sprintf('未命中任何线段（最近 %.1f 像素），请靠近线段点击。', bestDist));
@@ -325,6 +330,21 @@ function S = cleanupNodes(S)
         S.sk.edges(:,2) = newMap(S.sk.edges(:,2));
     end
     S.sk.nodes = S.sk.nodes(keepIdx, :);
+end
+
+function S = removeVehiclesOnEdge(S, A, B)
+%REMOVEVEHICLESONEDGE  删除位于线段 AB 上的车辆（距离 < roadHalfWidth）
+    if isempty(S.vehicles), return; end
+    keep = true(numel(S.vehicles), 1);
+    for i = 1:numel(S.vehicles)
+        d = ptToSegDist([S.vehicles(i).cx, S.vehicles(i).cy], A, B);
+        if d <= S.roadHalfWidth
+            keep(i) = false;
+        end
+    end
+    if ~all(keep)
+        S.vehicles = S.vehicles(keep);
+    end
 end
 
 
@@ -368,9 +388,11 @@ function onBtnClearSkeleton(fig)
     S = getS(fig);
     S.sk.nodes = zeros(0,2); S.sk.edges = zeros(0,2,'int32');
     S.sketchChain = []; S.roadMask = [];
+    S.vehicles = struct('id',{},'cx',{},'cy',{},'angle',{},'dispScale',{});
     setS(fig, S);
     setSketchState(fig, 'idle');
-    setStatus(fig, '道路已全部清空。');
+    updateIVDropdown(fig);
+    setStatus(fig, '道路已全部清空，车辆已移除。');
 end
 
 %% ==== State machine + road width ====
@@ -840,7 +862,7 @@ function onRotChanged(fig, src)
     % 同步滑条与标签
     src.Value = deg;
     if isfield(S.handles,'rotLabel') && isvalid(S.handles.rotLabel)
-        S.handles.rotLabel.Text = sprintf('旋转角度 (度): %.0f', deg);
+        S.handles.rotLabel.Text = sprintf('(有bug)旋转角度 (度): %.0f', deg);
     end
     S.rotDeg = deg;
     setS(fig, S);
