@@ -38,6 +38,7 @@ function fig = main()
     S.pnlGrid   = pnlChild;  % gridlayout（用于往里放控件）
     S.mapOrigin = [];        % 原始地图矩阵（只读）
     S.mapDisplay= [];        % 当前显示用副本
+    S.basicRoadMask = [];    % Basic 阶段手工道路 mask（非 OR1）
     S.scale     = 1.7;       % 1 像素 = 1.7 米
     S.mapW      = 1404;      % 图像宽度（列数）—— 横向地图
     S.mapH      = 803;       % 图像高度（行数）
@@ -84,6 +85,13 @@ function fig = main()
         S.mapOrigin  = imread(mapPath);
         S.mapDisplay = S.mapOrigin;
         [S.mapH, S.mapW, ~] = size(S.mapOrigin);
+        basicMaskPath = fullfile(mfileDir, 'RoadMask.jpg');
+        if isfile(basicMaskPath)
+            maskImage = imread(basicMaskPath);
+            if size(maskImage, 1) == S.mapH && size(maskImage, 2) == S.mapW
+                S.basicRoadMask = maskImage;
+            end
+        end
         setS(fig, S);
     end
     refreshView(fig);
@@ -96,7 +104,7 @@ end % main() 返回 fig
 %   返回 handles 结构体，包含所有需后续访问的控件句柄
 %% ====================================================================
 function h = buildPanel(pnl, fig)
-    rows = 28;
+    rows = 30;
     pnl.RowHeight = repmat({'fit'}, rows, 1);
     pnl.ColumnWidth = {'1x'};
     h = struct();
@@ -119,20 +127,26 @@ function h = buildPanel(pnl, fig)
     r = r + 1;
     addC('label', r, 'Text','──── 地图 ────', 'FontSize',11, 'FontWeight','bold');
     r = r + 1;
-    h.rotLabel = addC('label', r, 'Text','(有bug)旋转角度 (度): 0');
+    h.rotLabel = addC('label', r, 'Text','旋转角度 (度): 0');
     r = r + 1;
     h.rotSlider = addC('slider', r, 'Value',0, 'Limits',[-180 180], ...
                        'MajorTicks',[-180 -90 0 90 180], ...
                        'ValueChangedFcn', @(s,e) onRotChanged(fig,s));
 
-    % ----- 道路骨架 (OR1) -----
+    % ----- 可选功能入口 -----
     r = r + 1;
-    addC('label', r, 'Text','──── 道路骨架 (OR1) ────', 'FontSize',11, 'FontWeight','bold');
+    addC('label', r, 'Text','──── 可选功能 ────', 'FontSize',11, 'FontWeight','bold');
     r = r + 1;
-    h.btnOR1 = addC('button', r, 'Text','打开骨架工具', ...
+    h.btnOR1 = addC('button', r, 'Text','OR1 道路骨架', ...
                     'ButtonPushedFcn', @(s,e) or1_skeleton('open', fig));
     r = r + 1;
-    addC('label', r, 'Text','点击打开独立窗口提取道路骨架', 'FontSize',8, 'FontAngle','italic');
+    h.btnOR2 = addC('button', r, 'Text','OR2 预留', 'Enable','off');
+    r = r + 1;
+    h.btnOR3 = addC('button', r, 'Text','OR3 预留', 'Enable','off');
+    r = r + 1;
+    h.btnOR4 = addC('button', r, 'Text','OR4 预留', 'Enable','off');
+    r = r + 1;
+    h.btnOR5 = addC('button', r, 'Text','OR5 预留', 'Enable','off');
 
     % ----- 智能车分组 -----
     r = r + 1;
@@ -160,7 +174,7 @@ function h = buildPanel(pnl, fig)
     h.btnReportIV = addC('button', r, 'Text','报告位置', ...
                          'ButtonPushedFcn', @(s,e) onBtnReportIV(fig));
     r = r + 1;
-    addC('label', r, 'Text','提示: 加载前请先生成道路掩膜', 'FontSize',8, 'FontAngle','italic');
+    addC('label', r, 'Text','提示: IV 只能加载在道路上', 'FontSize',8, 'FontAngle','italic');
 
     % ----- 测量分组 -----
     r = r + 1;
@@ -270,18 +284,17 @@ end
 function handleLoadIVClick(fig, col, row)
 %HANDLELOADIVCLICK  loadIV 模式下点击地图加载车辆
     S = getS(fig);
-    % 道路校验：必须有 roadMask
-    if isempty(S.roadMask)
-        setStatus(fig, '请先生成道路掩膜，再加载车辆。');
-        uialert(S.fig, '请先点击"生成道路掩膜"。', '提示');
-        return;
-    end
     rc = round(row); cc = round(col);
     if rc < 1 || rc > S.mapH || cc < 1 || cc > S.mapW
         setStatus(fig, '点击点超出地图范围。');
         return;
     end
-    if ~S.roadMask(rc, cc)
+
+    isRoad = isBasicRoadPoint(S.mapOrigin, S.basicRoadMask, rc, cc);
+    if ~isempty(S.roadMask)
+        isRoad = isRoad || S.roadMask(rc, cc);
+    end
+    if ~isRoad
         setStatus(fig, sprintf('无效点 (%.0f,%.0f)：不在道路上！', col, row));
         uialert(S.fig, '该点不在道路上，无法加载车辆。', '加载失败');
         return;
@@ -320,6 +333,7 @@ function map = buildBaseMap(fig)
     for i = 1:numel(S.vehicles)
         map = drawIV(map, S.vehicles(i).cx, S.vehicles(i).cy, ...
             S.vehicles(i).angle, S.vehicles(i).dispScale, S.mapW, S.mapH, S.scale);
+        map = drawIVIdLabel(map, S.vehicles(i).id, S.vehicles(i).cx, S.vehicles(i).cy, S.mapW, S.mapH);
     end
 end
 
@@ -328,6 +342,82 @@ function map = overlayBlueRoad(map, roadMask)
     R = double(map(:,:,1)); G = double(map(:,:,2)); B = double(map(:,:,3));
     R(m) = R(m)*0.5+15; G(m) = G(m)*0.5+50; B(m) = B(m)*0.5+110;
     map = uint8(cat(3,R,G,B));
+end
+
+function isRoad = isBasicRoadPoint(mapImage, basicRoadMask, row, col)
+%ISBASICROADPOINT  Basic road check without using OR1.
+%  Use a hand-drawn RoadMask.jpg when available, then reject obvious
+%  non-road colors such as green fields or blue water.
+    [H, W, ~] = size(mapImage);
+    radius = 3;
+    roadLikeCount = 0;
+    totalCount = 0;
+
+    if ~isempty(basicRoadMask)
+        if ~hasBasicMaskRoadNearby(basicRoadMask, row, col)
+            isRoad = false;
+            return;
+        end
+    end
+
+    for r = row-radius:row+radius
+        for c = col-radius:col+radius
+            if r >= 1 && r <= H && c >= 1 && c <= W
+                totalCount = totalCount + 1;
+                redValue = double(mapImage(r, c, 1));
+                greenValue = double(mapImage(r, c, 2));
+                blueValue = double(mapImage(r, c, 3));
+
+                maxValue = max([redValue greenValue blueValue]);
+                minValue = min([redValue greenValue blueValue]);
+                averageValue = (redValue + greenValue + blueValue) / 3;
+
+                greenDominance = greenValue - min(redValue, blueValue);
+                blueDominance = blueValue - min(redValue, greenValue);
+
+                isBright = averageValue > 135;
+                isGrayLike = (maxValue - minValue) < 70;
+                isNotGreenArea = greenDominance < 35;
+                isNotWater = blueDominance < 45;
+
+                if isBright && isGrayLike && isNotGreenArea && isNotWater
+                    roadLikeCount = roadLikeCount + 1;
+                end
+            end
+        end
+    end
+
+    isRoad = roadLikeCount >= totalCount * 0.35;
+end
+
+function hasRoad = hasBasicMaskRoadNearby(maskImage, row, col)
+%HASBASICMASKROADNEARBY  Allow small hand-drawing error in RoadMask.jpg.
+    [H, W, ~] = size(maskImage);
+    toleranceRadius = 14;
+    hasRoad = false;
+
+    for r = row-toleranceRadius:row+toleranceRadius
+        for c = col-toleranceRadius:col+toleranceRadius
+            if r >= 1 && r <= H && c >= 1 && c <= W
+                if isMaskPixelWhite(maskImage, r, c)
+                    hasRoad = true;
+                    return;
+                end
+            end
+        end
+    end
+end
+
+function isWhite = isMaskPixelWhite(maskImage, row, col)
+    if size(maskImage, 3) == 3
+        redValue = double(maskImage(row, col, 1));
+        greenValue = double(maskImage(row, col, 2));
+        blueValue = double(maskImage(row, col, 3));
+        maskValue = (redValue + greenValue + blueValue) / 3;
+    else
+        maskValue = double(maskImage(row, col));
+    end
+    isWhite = maskValue > 160;
 end
 
 function refreshDisplay(fig)
@@ -412,6 +502,96 @@ function inside = pointInPolygon(pt, poly)
     end
 end
 
+function mapOut = drawIVIdLabel(mapIn, id, cx, cy, mapW, mapH)
+%DRAWIVIDLABEL  手写像素数字，在 IV 附近标注编号。
+    textColor = uint8([255 0 0]);
+    bgColor = uint8([255 255 255]);
+    scale = 2;
+    digitGap = 1;
+    idText = num2str(id);
+    digitW = 3 * scale;
+    digitH = 5 * scale;
+    labelW = length(idText) * digitW + (length(idText)-1) * digitGap + 4;
+    labelH = digitH + 4;
+
+    startCol = round(cx - labelW / 2);
+    startRow = round(cy - 20 - labelH);
+    if startRow < 1
+        startRow = round(cy + 16);
+    end
+    startCol = max(1, min(mapW - labelW + 1, startCol));
+    startRow = max(1, min(mapH - labelH + 1, startRow));
+
+    mapOut = fillRectOnImage(mapIn, startRow, startCol, labelH, labelW, bgColor, mapW, mapH);
+
+    digitCol = startCol + 2;
+    digitRow = startRow + 2;
+    for k = 1:length(idText)
+        mapOut = drawDigitOnImage(mapOut, idText(k), digitRow, digitCol, scale, textColor, mapW, mapH);
+        digitCol = digitCol + digitW + digitGap;
+    end
+end
+
+function mapOut = fillRectOnImage(mapIn, row, col, rectH, rectW, color, mapW, mapH)
+    mapOut = mapIn;
+    r1 = max(1, row);
+    r2 = min(mapH, row + rectH - 1);
+    c1 = max(1, col);
+    c2 = min(mapW, col + rectW - 1);
+    for r = r1:r2
+        for c = c1:c2
+            mapOut(r, c, :) = color;
+        end
+    end
+end
+
+function mapOut = drawDigitOnImage(mapIn, digitChar, row, col, scale, color, mapW, mapH)
+    pattern = digitPattern(digitChar);
+    mapOut = mapIn;
+    for pr = 1:5
+        for pc = 1:3
+            if pattern(pr, pc) == 1
+                for sr = 0:scale-1
+                    for sc = 0:scale-1
+                        rr = row + (pr-1)*scale + sr;
+                        cc = col + (pc-1)*scale + sc;
+                        if rr >= 1 && rr <= mapH && cc >= 1 && cc <= mapW
+                            mapOut(rr, cc, :) = color;
+                        end
+                    end
+                end
+            end
+        end
+    end
+end
+
+function p = digitPattern(digitChar)
+    switch digitChar
+        case '0'
+            p = [1 1 1; 1 0 1; 1 0 1; 1 0 1; 1 1 1];
+        case '1'
+            p = [0 1 0; 1 1 0; 0 1 0; 0 1 0; 1 1 1];
+        case '2'
+            p = [1 1 1; 0 0 1; 1 1 1; 1 0 0; 1 1 1];
+        case '3'
+            p = [1 1 1; 0 0 1; 0 1 1; 0 0 1; 1 1 1];
+        case '4'
+            p = [1 0 1; 1 0 1; 1 1 1; 0 0 1; 0 0 1];
+        case '5'
+            p = [1 1 1; 1 0 0; 1 1 1; 0 0 1; 1 1 1];
+        case '6'
+            p = [1 1 1; 1 0 0; 1 1 1; 1 0 1; 1 1 1];
+        case '7'
+            p = [1 1 1; 0 0 1; 0 1 0; 0 1 0; 0 1 0];
+        case '8'
+            p = [1 1 1; 1 0 1; 1 1 1; 1 0 1; 1 1 1];
+        case '9'
+            p = [1 1 1; 1 0 1; 1 1 1; 0 0 1; 1 1 1];
+        otherwise
+            p = zeros(5, 3);
+    end
+end
+
 function updateIVDropdown(fig)
 %UPDATEIVDROPDOWN  更新车辆下拉列表
     S = getS(fig);
@@ -431,13 +611,9 @@ end
 
 function onBtnLoadIV(fig)
     S = getS(fig);
-    if isempty(S.roadMask)
-        uialert(fig, '请先提取骨架并生成道路掩膜，再加载车辆。', '提示');
-        return;
-    end
     S.mode = 'loadIV';
     setS(fig, S);
-    setStatus(fig, '加载车辆模式：点击地图上道路区域放置车辆。');
+    setStatus(fig, '加载车辆模式：点击地图上的道路位置放置车辆。');
 end
 
 function onBtnRemoveIV(fig)
@@ -446,24 +622,78 @@ function onBtnRemoveIV(fig)
         setStatus(fig, '无车辆可移除。');
         return;
     end
-    sel = S.handles.ivDropdown.Value;
-    % 解析 "#id ..."
-    tok = regexp(sel, '^#(\d+)', 'match', 'once');
-    if isempty(tok)
-        setStatus(fig, '请先在下拉框选择要移除的车辆。');
+
+    if isfield(S, 'removeFig') && ~isempty(S.removeFig) && isvalid(S.removeFig)
+        figure(S.removeFig);
         return;
     end
-    rmId = str2double(regexp(sel, '#(\d+)', 'tokens', 'once'));
+
+    removeFig = uifigure('Name', '选择要移除的 IV', ...
+                         'Position', [220 220 320 300], ...
+                         'Resize', 'off');
+    gl = uigridlayout(removeFig, [4 2]);
+    gl.RowHeight = {'fit', '1x', 'fit', 'fit'};
+    gl.ColumnWidth = {'1x', '1x'};
+
+    titleLabel = uilabel(gl, 'Text', '请选择要移除的 IV 编号：', ...
+        'FontWeight', 'bold', 'HorizontalAlignment', 'center');
+    titleLabel.Layout.Row = 1;
+    titleLabel.Layout.Column = [1 2];
+
+    items = cell(1, numel(S.vehicles));
+    for i = 1:numel(S.vehicles)
+        [wx, wy] = px2world(fig, S.vehicles(i).cx, S.vehicles(i).cy);
+        items{i} = sprintf('#%d  位置(%.1f, %.1f)m  朝向 %.0f°', ...
+            S.vehicles(i).id, wx, wy, S.vehicles(i).angle);
+    end
+    listBox = uilistbox(gl, 'Items', items);
+    listBox.Layout.Row = 2;
+    listBox.Layout.Column = [1 2];
+
+    confirmBtn = uibutton(gl, 'Text', '移除所选 IV', ...
+        'ButtonPushedFcn', @(~,~) confirmRemoveIV(fig, removeFig, listBox));
+    confirmBtn.Layout.Row = 3;
+    confirmBtn.Layout.Column = 1;
+
+    cancelBtn = uibutton(gl, 'Text', '取消', ...
+        'ButtonPushedFcn', @(~,~) close(removeFig));
+    cancelBtn.Layout.Row = 3;
+    cancelBtn.Layout.Column = 2;
+
+    hint = uilabel(gl, 'Text', '提示：只会移除列表中选中的一辆 IV。', ...
+        'FontAngle', 'italic');
+    hint.Layout.Row = 4;
+    hint.Layout.Column = [1 2];
+
+    S.removeFig = removeFig;
+    setS(fig, S);
+end
+
+function confirmRemoveIV(fig, removeFig, listBox)
+    S = getS(fig);
+    sel = listBox.Value;
+    tok = regexp(sel, '#(\d+)', 'tokens', 'once');
+    if isempty(tok)
+        setStatus(fig, '请选择要移除的 IV。');
+        return;
+    end
+
+    rmId = str2double(tok{1});
     idx = find(arrayfun(@(v) v.id==rmId, S.vehicles), 1);
     if isempty(idx)
-        setStatus(fig, '未找到该车辆。');
+        setStatus(fig, sprintf('未找到 IV #%d。', rmId));
         return;
     end
+
     S.vehicles(idx) = [];
+    if isvalid(removeFig)
+        delete(removeFig);
+    end
+    S.removeFig = [];
     setS(fig, S);
     refreshDisplay(fig);
     updateIVDropdown(fig);
-    setStatus(fig, sprintf('车辆 #%d 已移除。', rmId));
+    setStatus(fig, sprintf('IV #%d 已移除。', rmId));
 end
 
 function onAngleChanged(fig, src)
@@ -636,7 +866,7 @@ function onRotChanged(fig, src)
     % 同步滑条与标签
     src.Value = deg;
     if isfield(S.handles,'rotLabel') && isvalid(S.handles.rotLabel)
-        S.handles.rotLabel.Text = sprintf('(有bug)旋转角度 (度): %.0f', deg);
+        S.handles.rotLabel.Text = sprintf('旋转角度 (度): %.0f', deg);
     end
     S.rotDeg = deg;
     setS(fig, S);
