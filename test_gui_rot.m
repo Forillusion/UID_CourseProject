@@ -4,11 +4,13 @@ try
     fig = main();
     S = getappdata(fig, 'S');
 
-    % Setup skeleton + finalize (generates mask, shows blue road)
+    % Setup skeleton + finalize via OR1 popup
     S.sk.nodes = [100 100; 400 100; 400 500];
     S.sk.edges = [1 2; 2 3];
     setappdata(fig, 'S', S);
-    S.handles.btnFinishSketch.ButtonPushedFcn(S.handles.btnFinishSketch, []);
+    or1_skeleton('open', fig);
+    S = getappdata(fig, 'S');
+    S.or1.btnFinish.ButtonPushedFcn(S.or1.btnFinish, []);
     S = getappdata(fig, 'S');
     assert(strcmp(S.sketchState, 'finalized'), 'not finalized');
     assert(~isempty(S.roadMask), 'no roadMask');
@@ -56,7 +58,7 @@ try
     fprintf('[OK] back to 0deg\n');
 
     %% 4. Test sketch mode hides blue, shows red
-    S.handles.btnSketch.ButtonPushedFcn(S.handles.btnSketch, []);
+    S.or1.btnSketch.ButtonPushedFcn(S.or1.btnSketch, []);
     S = getappdata(fig, 'S');
     assert(strcmp(S.sketchState, 'sketching'), 'not sketching');
     % Red skeleton should be visible now
@@ -67,20 +69,20 @@ try
     fprintf('[OK] sketching: red=%d (blue hidden=%d)\n', redPx, bluePx2);
 
     %% 5. Erase toggle
-    S.handles.btnErase.ButtonPushedFcn(S.handles.btnErase, []);
+    S.or1.btnErase.ButtonPushedFcn(S.or1.btnErase, []);
     S = getappdata(fig, 'S');
     assert(strcmp(S.sketchState, 'erasing'), 'not erasing');
     assert(strcmp(get(fig,'Pointer'), 'circle'), 'cursor not circle');
     fprintf('[OK] erasing mode + circle cursor\n');
 
     %% 6. Toggle back to sketching
-    S.handles.btnErase.ButtonPushedFcn(S.handles.btnErase, []);
+    S.or1.btnErase.ButtonPushedFcn(S.or1.btnErase, []);
     S = getappdata(fig, 'S');
     assert(strcmp(S.sketchState, 'sketching'), 'not back to sketching');
     fprintf('[OK] back to sketching\n');
 
     %% 7. Clear all
-    S.handles.btnClearSkeleton.ButtonPushedFcn(S.handles.btnClearSkeleton, []);
+    S.or1.btnClear.ButtonPushedFcn(S.or1.btnClear, []);
     S = getappdata(fig, 'S');
     assert(strcmp(S.sketchState, 'idle'), 'not idle after clear');
     assert(isempty(S.sk.edges), 'edges not cleared');

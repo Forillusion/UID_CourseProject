@@ -1,0 +1,26 @@
+refactor: split OR1 into separate popup window + file
+
+Architecture:
+- or1_skeleton.m: new file with OR1 popup window (buttons only, no map)
+- main.m: panel has single "打开骨架工具" button that calls or1_skeleton('open',fig)
+- Popup controls operate directly on main window's map
+
+Dispatch pattern:
+- or1_skeleton(action, mainFig, ...) handles open/click/close
+- main.m onMouseDown dispatches sketch/erase to or1_skeleton('click',...)
+- Function handles stored in S.fn (refresh/setStatus/updateDropdown)
+  allow or1_skeleton.m to call main.m's local functions
+
+Features:
+- Popup has: 提取骨架/提取结束/擦除道路/清空道路/道路宽度/模式标签/统计/关闭
+- Close behavior: auto-finalize if sketching/erasing
+- All OR1 algorithms moved to or1_skeleton.m:
+  genRoadMask, cleanupNodes, removeVehiclesOnEdge, ptToSegDist
+- main.m keeps display functions: overlaySkeleton, overlayBlueRoad, stampSquare
+
+Removed from main.m:
+- 13 OR1 functions (handleSketchClick, handleEraseClick, onBtnSketch, etc.)
+- OR1 panel controls (btnSketch, btnFinishSketch, btnErase, btnClearSkeleton,
+  roadWidthSlider, roadWidthValue, sketchModeLabel)
+
+Tests: test_or1_popup.m (full workflow), test_gui_rot.m updated

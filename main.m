@@ -62,6 +62,12 @@ function fig = main()
     S.measurePts = zeros(0,2);   % [K x 2]
     S.sketchChain = [];          % 当前折线正在输入的节点序号列表
 
+    % —— 函数句柄（供 or1_skeleton.m 跨文件调用） ——
+    S.fn = struct();
+    S.fn.refresh = @refreshDisplay;
+    S.fn.setStatus = @setStatus;
+    S.fn.updateDropdown = @updateIVDropdown;
+
     setappdata(fig, 'S', S);
 
     %% ---------- 4. 构建左侧控制面板 ----------
@@ -119,37 +125,14 @@ function h = buildPanel(pnl, fig)
                        'MajorTicks',[-180 -90 0 90 180], ...
                        'ValueChangedFcn', @(s,e) onRotChanged(fig,s));
 
-    % ----- 骨架分组 (OR1) -----
+    % ----- 道路骨架 (OR1) -----
     r = r + 1;
     addC('label', r, 'Text','──── 道路骨架 (OR1) ────', 'FontSize',11, 'FontWeight','bold');
     r = r + 1;
-    h.btnSketch = addC('button', r, 'Text','提取骨架', ...
-                       'ButtonPushedFcn', @(s,e) onBtnSketch(fig));
+    h.btnOR1 = addC('button', r, 'Text','打开骨架工具', ...
+                    'ButtonPushedFcn', @(s,e) or1_skeleton('open', fig));
     r = r + 1;
-    h.btnFinishSketch = addC('button', r, 'Text','提取结束', ...
-                             'Enable','off', ...
-                             'ButtonPushedFcn', @(s,e) onBtnFinishSketch(fig));
-    r = r + 1;
-    h.btnErase = addC('button', r, 'Text','擦除道路', ...
-                      'Enable','off', ...
-                      'ButtonPushedFcn', @(s,e) onBtnErase(fig));
-    r = r + 1;
-    h.btnClearSkeleton = addC('button', r, 'Text','清空道路', ...
-                              'ButtonPushedFcn', @(s,e) onBtnClearSkeleton(fig));
-    r = r + 1;
-    addC('label', r, 'Text','道路半宽(像素):', 'FontSize',9);
-    r = r + 1;
-    h.roadWidthSlider = addC('slider', r, 'Value',2, 'Limits',[1 15], ...
-                             'MajorTicks',[1 5 10 15], ...
-                             'ValueChangedFcn', @(s,e) onRoadWidthChanged(fig,s));
-    r = r + 1;
-    h.roadWidthValue = addC('label', r, 'Text','当前: 2 像素', 'FontSize',9);
-    r = r + 1;
-    h.sketchModeLabel = addC('label', r, 'Text','当前模式: 空闲', ...
-                             'FontSize',10, 'FontWeight','bold', ...
-                             'FontColor',[0 0.5 0]);
-    r = r + 1;
-    addC('label', r, 'Text','左键画点 右键结束折线 | 擦除:点线段删除', 'FontSize',8, 'FontAngle','italic');
+    addC('label', r, 'Text','点击打开独立窗口提取道路骨架', 'FontSize',8, 'FontAngle','italic');
 
     % ----- 智能车分组 -----
     r = r + 1;
@@ -231,16 +214,8 @@ function onMouseDown(fig, ~)
 
     % 按模式分发
     switch S.mode
-        case 'sketch'
-            if strcmp(selType, 'alt')      % 右键：结束当前折线
-                S.sketchChain = [];
-                setS(fig, S);
-                setStatus(fig, '折线已结束，可开始新的折线（左键画点）。');
-            else                            % 左键：添加节点
-                handleSketchClick(fig, col, row);
-            end
-        case 'erase'
-            handleEraseClick(fig, col, row);
+        case {'sketch', 'erase'}
+            or1_skeleton('click', fig, col, row, selType);
         case 'loadIV'
             handleLoadIVClick(fig, col, row);
         case 'measure2'
@@ -254,222 +229,6 @@ end
 
 function onMouseUp(fig, ~)
     % 预留：拖拽相关
-end
-
-
-%% ====================================================================
-%   骨架交互处理
-%% ====================================================================
-function handleSketchClick(fig, col, row)
-%HANDLESKETCHCLICK  sketch 模式下左键添加节点并连接
-    S = getS(fig);
-    % 追加新节点
-    S.sk.nodes(end+1, :) = [col, row];   %#ok<AGROW>
-    nodeIdx = size(S.sk.nodes, 1);
-    % 如果当前折线非空，连接上一节点
-    if ~isempty(S.sketchChain)
-        prev = S.sketchChain(end);
-        S.sk.edges(end+1, :) = [prev, nodeIdx];  %#ok<AGROW>
-    end
-    S.sketchChain(end+1) = nodeIdx;      %#ok<AGROW>
-    setS(fig, S);
-    refreshDisplay(fig);
-    setStatus(fig, sprintf('已添加节点 #%d（折线内第 %d 点）', nodeIdx, numel(S.sketchChain)));
-end
-
-function handleEraseClick(fig, col, row)
-%HANDLEERASECLICK  erase 模式下删除离点击点最近的整条线段
-    S = getS(fig);
-    if isempty(S.sk.edges)
-        setStatus(fig, '无骨架可擦除。');
-        return;
-    end
-    P = [col, row];
-    threshold = 6;   % 像素，命中阈值
-    bestIdx = 0; bestDist = inf;
-    for i = 1:size(S.sk.edges, 1)
-        ni = S.sk.edges(i, 1); nj = S.sk.edges(i, 2);
-        A = S.sk.nodes(ni, :); B = S.sk.nodes(nj, :);
-        d = ptToSegDist(P, A, B);
-        if d < bestDist
-            bestDist = d; bestIdx = i;
-        end
-    end
-    if bestIdx > 0 && bestDist < threshold
-        % 记录被删除线段的两端节点坐标（在重映射前）
-        ni_old = S.sk.edges(bestIdx, 1); nj_old = S.sk.edges(bestIdx, 2);
-        A_old = S.sk.nodes(ni_old, :); B_old = S.sk.nodes(nj_old, :);
-        S.sk.edges(bestIdx, :) = [];   % 删除该边
-        S = cleanupNodes(S);
-        % 删除位于该线段上的车辆（点到线段距离 < roadHalfWidth）
-        S = removeVehiclesOnEdge(S, A_old, B_old);
-        setS(fig, S);
-        refreshDisplay(fig);
-        updateIVDropdown(fig);
-        setStatus(fig, sprintf('已擦除线段（最近距离 %.1f 像素）', bestDist));
-    else
-        setStatus(fig, sprintf('未命中任何线段（最近 %.1f 像素），请靠近线段点击。', bestDist));
-    end
-end
-
-function S = cleanupNodes(S)
-%CLEANUPNODES  删除孤立节点并重映射 edge 索引
-    nNodes = size(S.sk.nodes, 1);
-    if nNodes == 0, return; end
-    used = false(nNodes, 1);
-    if ~isempty(S.sk.edges)
-        used(S.sk.edges(:)) = true;
-    end
-    keepIdx = find(used);
-    % 建立旧索引 -> 新索引的映射表
-    newMap = zeros(nNodes, 1);
-    newMap(keepIdx) = 1:numel(keepIdx);
-    % 重映射 edges
-    if ~isempty(S.sk.edges)
-        S.sk.edges(:,1) = newMap(S.sk.edges(:,1));
-        S.sk.edges(:,2) = newMap(S.sk.edges(:,2));
-    end
-    S.sk.nodes = S.sk.nodes(keepIdx, :);
-end
-
-function S = removeVehiclesOnEdge(S, A, B)
-%REMOVEVEHICLESONEDGE  删除位于线段 AB 上的车辆（距离 < roadHalfWidth）
-    if isempty(S.vehicles), return; end
-    keep = true(numel(S.vehicles), 1);
-    for i = 1:numel(S.vehicles)
-        d = ptToSegDist([S.vehicles(i).cx, S.vehicles(i).cy], A, B);
-        if d <= S.roadHalfWidth
-            keep(i) = false;
-        end
-    end
-    if ~all(keep)
-        S.vehicles = S.vehicles(keep);
-    end
-end
-
-
-%% ====================================================================
-%   骨架按钮回调
-%% ====================================================================
-function onBtnSketch(fig)
-    S = getS(fig); S.sketchChain = []; setS(fig, S);
-    setSketchState(fig, 'sketching');
-    setStatus(fig, '点选输入：左键画点，右键结束当前折线。');
-end
-
-function onBtnFinishSketch(fig)
-    S = getS(fig);
-    if isempty(S.sk.edges)
-        uialert(fig, '尚未画出任何道路骨架，请先用左键点击画线。', '提示'); return;
-    end
-    setStatus(fig, sprintf('正在生成道路掩膜（半宽=%d像素）...', S.roadHalfWidth));
-    drawnow;
-    S.roadMask = genRoadMask(S.sk.nodes, S.sk.edges, S.roadHalfWidth, S.mapW, S.mapH);
-    setS(fig, S); roadPx = sum(S.roadMask(:));
-    setSketchState(fig, 'finalized');
-    setStatus(fig, sprintf('提取完成！道路掩膜 %d 像素。', roadPx));
-end
-
-function onBtnErase(fig)
-    S = getS(fig);
-    if strcmp(S.sketchState, 'erasing')
-        setSketchState(fig, 'sketching');
-        setStatus(fig, '已返回点选输入模式。');
-    else
-        if isempty(S.sk.edges)
-            uialert(fig, '尚无线段可擦除。', '提示'); return;
-        end
-        setSketchState(fig, 'erasing');
-        setStatus(fig, '擦除模式：点击要删除的线段（整条删除）。');
-    end
-end
-
-function onBtnClearSkeleton(fig)
-    S = getS(fig);
-    S.sk.nodes = zeros(0,2); S.sk.edges = zeros(0,2,'int32');
-    S.sketchChain = []; S.roadMask = [];
-    S.vehicles = struct('id',{},'cx',{},'cy',{},'angle',{},'dispScale',{});
-    setS(fig, S);
-    setSketchState(fig, 'idle');
-    updateIVDropdown(fig);
-    setStatus(fig, '道路已全部清空，车辆已移除。');
-end
-
-%% ==== State machine + road width ====
-function setSketchState(fig, newState)
-    S = getS(fig); S.sketchState = newState;
-    switch newState
-        case 'sketching', S.mode = 'sketch';
-        case 'erasing',   S.mode = 'erase';
-        otherwise,          S.mode = 'idle';
-    end
-    setS(fig, S); updateSketchButtons(fig, newState);
-    if strcmp(newState, 'erasing'), set(fig,'Pointer','circle');
-    else, set(fig,'Pointer','arrow'); end
-    updateModeLabel(fig, newState); refreshDisplay(fig);
-end
-
-function updateSketchButtons(fig, state)
-    S = getS(fig); h = S.handles;
-    switch state
-        case {'idle','finalized'}
-            h.btnSketch.Enable='on'; h.btnFinishSketch.Enable='off';
-            h.btnErase.Enable='off'; h.btnErase.Text='擦除道路';
-        case 'sketching'
-            h.btnSketch.Enable='on'; h.btnFinishSketch.Enable='on';
-            h.btnErase.Enable='on'; h.btnErase.Text='擦除道路';
-        case 'erasing'
-            h.btnSketch.Enable='on'; h.btnFinishSketch.Enable='on';
-            h.btnErase.Enable='on'; h.btnErase.Text='返回点选';
-    end
-end
-
-function updateModeLabel(fig, state)
-    S = getS(fig); lbl = S.handles.sketchModeLabel;
-    switch state
-        case 'idle',      lbl.Text='当前模式: 空闲'; lbl.FontColor=[0 .5 0];
-        case 'sketching', lbl.Text='当前模式: 点选输入'; lbl.FontColor=[.8 0 0];
-        case 'erasing',   lbl.Text='当前模式: 擦除'; lbl.FontColor=[.5 0 .5];
-        case 'finalized', lbl.Text='当前模式: 提取完成'; lbl.FontColor=[0 0 .8];
-    end
-end
-
-function onRoadWidthChanged(fig, src)
-    S = getS(fig); S.roadHalfWidth = round(src.Value); setS(fig, S);
-    S.handles.roadWidthValue.Text = sprintf('当前: %d 像素', S.roadHalfWidth);
-    if strcmp(S.sketchState, 'finalized') && ~isempty(S.sk.edges)
-        S = getS(fig);
-        S.roadMask = genRoadMask(S.sk.nodes, S.sk.edges, S.roadHalfWidth, S.mapW, S.mapH);
-        setS(fig, S); refreshDisplay(fig);
-    end
-end
-
-function mask = genRoadMask(nodes, edges, halfWidth, mapW, mapH)
-%GENROADMASK  根据骨架生成道路掩膜（手写膨胀）
-%  对每条边，遍历其 bounding box(+margin) 内的像素，
-%  距离 < halfWidth 则标记为道路。
-    mask = false(mapH, mapW);
-    tol = halfWidth + 1;
-    for i = 1:size(edges, 1)
-        ni = edges(i,1); nj = edges(i,2);
-        A = nodes(ni,:); B = nodes(nj,:);
-        % bounding box
-        cMin = max(1, floor(min(A(1),B(1)) - tol));
-        cMax = min(mapW, ceil(max(A(1),B(1)) + tol));
-        rMin = max(1, floor(min(A(2),B(2)) - tol));
-        rMax = min(mapH, ceil(max(A(2),B(2)) + tol));
-        % 遍历 box 内每个像素
-        for r = rMin:rMax
-            for c = cMin:cMax
-                if ~mask(r, c)
-                    d = ptToSegDist([c, r], A, B);
-                    if d <= halfWidth
-                        mask(r, c) = true;
-                    end
-                end
-            end
-        end
-    end
 end
 
 function map = overlaySkeleton(map, nodes, edges, mapW, mapH)
@@ -1024,22 +783,8 @@ end
 
 %% ====================================================================
 %   几何 / 图形算法（手写）
+%   ptToSegDist / genRoadMask 已迁移到 or1_skeleton.m
 %% ====================================================================
-function d = ptToSegDist(P, A, B)
-%PTTOSEGDIST  点 P 到线段 AB 的最短距离
-    AB = B - A;
-    AP = P - A;
-    ab2 = dot(AB, AB);
-    if ab2 == 0
-        d = norm(P - A);
-        return;
-    end
-    t = dot(AP, AB) / ab2;
-    t = max(0, min(1, t));          % 钳制到 [0,1]，保证投影落在线段上
-    closest = A + t * AB;
-    d = norm(P - closest);
-end
-
 function pts = bresenham(x0, y0, x1, y1)
 %BRESENHAM  经典 Bresenham 直线算法，返回线上所有像素 [col row]
     x0 = round(x0); y0 = round(y0); x1 = round(x1); y1 = round(y1);
