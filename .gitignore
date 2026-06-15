@@ -1,3 +1,8 @@
 .opencode/
-
-.gitignore
+*.asv
+*.m~
+*.mat
+*.png
+*.rar
+*.zip
+commit_msg.txt
