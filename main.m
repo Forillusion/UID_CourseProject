@@ -172,7 +172,8 @@ function h = buildPanel(pnl, fig)
     h.btnOR4 = addC('button', r, 'Text','OR4 虚拟街景', ...
                     'ButtonPushedFcn', @(s,e) or4_street_view('open', fig));
     r = r + 1;
-    h.btnOR5 = addC('button', r, 'Text','OR5 预留', 'Enable','off');
+    h.btnOR5 = addC('button', r, 'Text','OR5 路径规划', ...
+                    'ButtonPushedFcn', @(s,e) or5_path_planning('open', fig));
 
     % ----- 智能车分组 -----
     r = r + 1;
@@ -277,6 +278,8 @@ function onMouseDown(fig, ~)
             handleLoadIVClick(fig, col, row);
         case 'or4'
             or4_street_view('click', fig, col, row, selType);
+        case {'or5_start','or5_end'}
+            or5_path_planning('click', fig, col, row, selType);
         case 'measure2'
             handleMeasure2Click(fig, col, row);
         case 'track'
@@ -402,6 +405,10 @@ function map = buildBaseMap(fig)
     % OR4：叠加相机标记（位置 + FOV 锥形）
     if isfield(S, 'or4') && ~isempty(S.or4) && isfield(S.or4, 'cam')
         map = or4_street_view('drawCam', fig, map);
+    end
+    % OR5：叠加路径/起终点
+    if isfield(S, 'or5') && ~isempty(S.or5)
+        map = or5_path_planning('overlay', fig, map);
     end
 end
 
