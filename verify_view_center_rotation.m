@@ -14,7 +14,7 @@ S.handles.rotSlider.Value = 45;
 cb(S.handles.rotSlider, []);
 
 S = getappdata(fig, 'S');
-th = deg2rad(S.rotDeg);
+th = S.rotDeg * pi / 180;
 c = cos(th);
 s = sin(th);
 corners = [0.5 0.5; S.mapW + 0.5 0.5; S.mapW + 0.5 S.mapH + 0.5; 0.5 S.mapH + 0.5];

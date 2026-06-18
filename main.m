@@ -553,7 +553,7 @@ function mapOut = drawIV(mapIn, cx, cy, angleDeg, dispScale, mapW, mapH, scale)
     Wd = (3 / scale) * dispScale;  % 宽（像素）
     headLen = L * 0.25;            % 车头长度（占全长 1/4）
     bodyLen = L - headLen;         % 车身长度
-    th = deg2rad(angleDeg);
+    th = angleDeg * pi / 180;
     R = [cos(th) -sin(th); sin(th) cos(th)];
 
     % —— 1. 画车身（绿色）：从中心偏后 headLen/2 开始 ——
@@ -1198,7 +1198,7 @@ end
 function out = rotateMapAroundPoint(img, cx, cy, deg)
 %ROTATEMAPAROUNDPOINT  手搓图像绕任意点旋转（反向映射 + 最近邻采样）
     [H, W, ~] = size(img);
-    th = deg2rad(deg);
+    th = deg * pi / 180;
     c = cos(th); s = sin(th);
 
     % 1. 计算旋转后新画布的外接尺寸
@@ -1228,7 +1228,7 @@ function out = rotateMapAroundPoint(img, cx, cy, deg)
 end
 
 function [newH, newW, shiftCol, shiftRow] = getRotationCanvasInfo(W, H, cx, cy, deg)
-    th = deg2rad(deg);
+    th = deg * pi / 180;
     c = cos(th);
     s = sin(th);
     corners = [0.5 0.5; W + 0.5 0.5; W + 0.5 H + 0.5; 0.5 H + 0.5];
@@ -1363,7 +1363,7 @@ function pt = mapDisplayPointToOriginal(S, colD, rowD)
         pt = [colD rowD];
         return;
     end
-    th = deg2rad(deg);
+    th = deg * pi / 180;
     [~, ~, shiftCol, shiftRow] = getRotationCanvasInfo(S.mapW, S.mapH, cx0, cy0, deg);
     rotCol = shiftCol + colD - 1;
     rotRow = shiftRow + rowD - 1;
@@ -1394,7 +1394,7 @@ function pt = mapOriginalPointToDisplay(S, col, row)
         pt = [col row];
         return;
     end
-    th = deg2rad(deg);
+    th = deg * pi / 180;
     [~, ~, shiftCol, shiftRow] = getRotationCanvasInfo(S.mapW, S.mapH, cx0, cy0, deg);
     x = col - cx0;
     y = row - cy0;

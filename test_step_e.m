@@ -77,7 +77,7 @@ fprintf('\n========== Step E Test PASSED ==========\n');
 %% ===== Local function =====
 function out = rotateMap(img, deg)
     [H, W, ~] = size(img);
-    th = deg2rad(deg);
+    th = deg * pi / 180;
     c = cos(th); s = sin(th);
     corners = [0 0; W 0; W H; 0 H];
     rotCorners = corners * [c -s; s c]';

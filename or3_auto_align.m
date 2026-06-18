@@ -101,7 +101,7 @@ end
 %% ====================================================================
 function out = rotateMapAroundPoint(img, cx, cy, deg)
     [H, W, ~] = size(img);
-    th = deg2rad(deg);
+    th = deg * pi / 180;
     c  = cos(th);
     s  = sin(th);
 

@@ -72,7 +72,7 @@ function mapOut = drawIV(mapIn, cx, cy, angleDeg, dispScale, mapW, mapH, scale)
     L = (8 / scale) * dispScale;
     Wd = (3 / scale) * dispScale;
     headLen = L * 0.25;
-    th = deg2rad(angleDeg);
+    th = angleDeg * pi / 180;
     R = [cos(th) -sin(th); sin(th) cos(th)];
     mapOut = mapIn;
     % body (green)
