@@ -10,6 +10,7 @@ function fig = main()
                    'Position', [100 100 1200 760], ...
                    'AutoResizeChildren','off', ...
                    'WindowButtonDownFcn', @onMouseDown, ...
+                   'WindowButtonMotionFcn', @onMouseMove, ...
                    'WindowButtonUpFcn',   @onMouseUp, ...
                    'SizeChangedFcn', @onResize);
 
@@ -46,8 +47,16 @@ function fig = main()
     S.sketchState = 'idle';  % 骨架工作流: idle/sketching/erasing/finalized
     S.rotDeg    = 0;         % 当前地图旋转角度
     S.rotSize   = [];        % 旋转后画布尺寸 [newH newW]（空=未旋转）
+    S.rotCX     = [];        % 普通旋转模式的旋转中心 x（列）
+    S.rotCY     = [];        % 普通旋转模式的旋转中心 y（行）
     S.dispH     = S.mapH;    % 当前显示图高度（行）
     S.dispW     = S.mapW;    % 当前显示图宽度（列）
+    S.viewZoom  = 1;         % 显示缩放倍率（只改 axes 视窗，不改图像矩阵）
+    S.viewCenter = [];       % 当前视窗中心 [col row]，空=图像中心
+    S.isPanning = false;
+    S.panStartPoint = [];
+    S.panStartXLim = [];
+    S.panStartYLim = [];
 
     % —— OR1 道路骨架相关（后续步骤填充） ——
     S.sk.nodes  = zeros(0,2);  % [N x 2]，每行 [col, row]
@@ -58,6 +67,12 @@ function fig = main()
     % —— 车辆相关（后续步骤） ——
     S.vehicles  = struct('id',{},'cx',{},'cy',{},'angle',{},'dispScale',{});
     S.nextIVid  = 1;
+
+    % —— OR3 车头朝上模式 ——
+    S.headUpMode  = false;   % 是否启用"车头始终朝上"显示模式
+    S.headUpAngle = 0;       % 车头朝上模式使用的车辆角度（度）
+    S.headUpCX    = [];      % 车头朝上模式旋转中心 x（列）
+    S.headUpCY    = [];      % 车头朝上模式旋转中心 y（行）
 
     % —— 测量暂存 ——
     S.measurePts = zeros(0,2);   % [K x 2]
@@ -104,7 +119,7 @@ end % main() 返回 fig
 %   返回 handles 结构体，包含所有需后续访问的控件句柄
 %% ====================================================================
 function h = buildPanel(pnl, fig)
-    rows = 30;
+    rows = 33;
     pnl.RowHeight = repmat({'fit'}, rows, 1);
     pnl.ColumnWidth = {'1x'};
     h = struct();
@@ -132,6 +147,15 @@ function h = buildPanel(pnl, fig)
     h.rotSlider = addC('slider', r, 'Value',0, 'Limits',[-180 180], ...
                        'MajorTicks',[-180 -90 0 90 180], ...
                        'ValueChangedFcn', @(s,e) onRotChanged(fig,s));
+    r = r + 1;
+    h.zoomLabel = addC('label', r, 'Text','显示缩放: 1.0x');
+    r = r + 1;
+    h.zoomSlider = addC('slider', r, 'Value',1, 'Limits',[1 4], ...
+                        'MajorTicks',[1 2 3 4], ...
+                        'ValueChangedFcn', @(s,e) onZoomChanged(fig,s));
+    r = r + 1;
+    h.btnResetView = addC('button', r, 'Text','重置视图', ...
+                          'ButtonPushedFcn', @(s,e) onResetView(fig));
 
     % ----- 可选功能入口 -----
     r = r + 1;
@@ -142,9 +166,11 @@ function h = buildPanel(pnl, fig)
     r = r + 1;
     h.btnOR2 = addC('button', r, 'Text','OR2 预留', 'Enable','off');
     r = r + 1;
-    h.btnOR3 = addC('button', r, 'Text','OR3 预留', 'Enable','off');
+    h.btnOR3 = addC('button', r, 'Text','OR3 车辆朝向', ...
+                    'ButtonPushedFcn', @(s,e) onBtnOR3(fig));
     r = r + 1;
-    h.btnOR4 = addC('button', r, 'Text','OR4 预留', 'Enable','off');
+    h.btnOR4 = addC('button', r, 'Text','OR4 虚拟街景', ...
+                    'ButtonPushedFcn', @(s,e) or4_street_view('open', fig));
     r = r + 1;
     h.btnOR5 = addC('button', r, 'Text','OR5 预留', 'Enable','off');
 
@@ -161,7 +187,8 @@ function h = buildPanel(pnl, fig)
     addC('label', r, 'Text','选择车辆:', 'FontSize',9);
     r = r + 1;
     h.ivDropdown = addC('dropdown', r, 'Items', {'(无车辆)'}, ...
-                        'Value', '(无车辆)');
+                        'Value', '(无车辆)', ...
+                        'ValueChangedFcn', @(s,e) onIVDropdownChanged(fig));
     r = r + 1;
     addC('label', r, 'Text','朝向调整(度):', 'FontSize',9);
     r = r + 1;
@@ -170,6 +197,14 @@ function h = buildPanel(pnl, fig)
                          'ValueChangedFcn', @(s,e) onAngleChanged(fig,s));
     r = r + 1;
     h.angleValue = addC('label', r, 'Text','当前: 0°', 'FontSize',9);
+    % —— OR3 复选框 ——
+    r = r + 1;
+    h.chkAutoAlign = addC('checkbox', r, 'Text','自动对齐道路方向 (OR3)', ...
+                          'Value', true);
+    r = r + 1;
+    h.chkHeadUp = addC('checkbox', r, 'Text','车头始终朝上 (OR3)', ...
+                       'Value', false, ...
+                       'ValueChangedFcn', @(s,e) onHeadUpToggled(fig, s));
     r = r + 1;
     h.btnReportIV = addC('button', r, 'Text','报告位置', ...
                          'ButtonPushedFcn', @(s,e) onBtnReportIV(fig));
@@ -212,6 +247,14 @@ function onMouseDown(fig, ~)
 %ONMOUSEDOWN  主鼠标按下回调，按 mode + 按键类型分发
     S = getS(fig);
     if isempty(S.mapOrigin), return; end
+    if strcmp(S.mode, 'idle') && isPointerInDisplay(fig, S.ax)
+        cp = get(S.ax, 'CurrentPoint');
+        S.isPanning = true;
+        S.panStartPoint = cp(1,1:2);
+        S.panStartXLim = S.ax.XLim;
+        S.panStartYLim = S.ax.YLim;
+        setS(fig, S);
+    end
     pt = getPointerOnAxes(fig, S.ax);
     if isempty(pt), return; end
     col = pt(1); row = pt(2);
@@ -232,6 +275,8 @@ function onMouseDown(fig, ~)
             or1_skeleton('click', fig, col, row, selType);
         case 'loadIV'
             handleLoadIVClick(fig, col, row);
+        case 'or4'
+            or4_street_view('click', fig, col, row, selType);
         case 'measure2'
             handleMeasure2Click(fig, col, row);
         case 'track'
@@ -241,8 +286,25 @@ function onMouseDown(fig, ~)
     end
 end
 
+function onMouseMove(fig, ~)
+    S = getS(fig);
+    if ~isfield(S,'isPanning') || ~S.isPanning || isempty(S.panStartPoint)
+        return;
+    end
+    cp = get(S.ax, 'CurrentPoint');
+    delta = cp(1,1:2) - S.panStartPoint;
+    startCenter = [mean(S.panStartXLim), mean(S.panStartYLim)];
+    S.viewCenter = startCenter - delta;
+    setS(fig, S);
+    applyViewLimits(fig);
+end
+
 function onMouseUp(fig, ~)
-    % 预留：拖拽相关
+    S = getS(fig);
+    if isfield(S,'isPanning')
+        S.isPanning = false;
+        setS(fig, S);
+    end
 end
 
 function map = overlaySkeleton(map, nodes, edges, mapW, mapH)
@@ -290,10 +352,7 @@ function handleLoadIVClick(fig, col, row)
         return;
     end
 
-    isRoad = isBasicRoadPoint(S.mapOrigin, S.basicRoadMask, rc, cc);
-    if ~isempty(S.roadMask)
-        isRoad = isRoad || S.roadMask(rc, cc);
-    end
+    isRoad = isRoadPointForUI(S.mapOrigin, S.basicRoadMask, S.roadMask, rc, cc);
     if ~isRoad
         setStatus(fig, sprintf('无效点 (%.0f,%.0f)：不在道路上！', col, row));
         uialert(S.fig, '该点不在道路上，无法加载车辆。', '加载失败');
@@ -303,6 +362,11 @@ function handleLoadIVClick(fig, col, row)
     angle = 0;
     if isfield(S.handles,'angleSlider') && isvalid(S.handles.angleSlider)
         angle = S.handles.angleSlider.Value;
+    end
+    % OR3 自动对齐：复选框启用时，覆盖用户手动角度
+    if isfield(S.handles,'chkAutoAlign') && isvalid(S.handles.chkAutoAlign) ...
+            && S.handles.chkAutoAlign.Value
+        angle = or3_auto_align('findAngle', fig, col, row);
     end
     v.id = S.nextIVid;
     v.cx = col; v.cy = row;
@@ -335,6 +399,10 @@ function map = buildBaseMap(fig)
             S.vehicles(i).angle, S.vehicles(i).dispScale, S.mapW, S.mapH, S.scale);
         map = drawIVIdLabel(map, S.vehicles(i).id, S.vehicles(i).cx, S.vehicles(i).cy, S.mapW, S.mapH);
     end
+    % OR4：叠加相机标记（位置 + FOV 锥形）
+    if isfield(S, 'or4') && ~isempty(S.or4) && isfield(S.or4, 'cam')
+        map = or4_street_view('drawCam', fig, map);
+    end
 end
 
 function map = overlayBlueRoad(map, roadMask)
@@ -353,12 +421,7 @@ function isRoad = isBasicRoadPoint(mapImage, basicRoadMask, row, col)
     roadLikeCount = 0;
     totalCount = 0;
 
-    if ~isempty(basicRoadMask)
-        if ~hasBasicMaskRoadNearby(basicRoadMask, row, col)
-            isRoad = false;
-            return;
-        end
-    end
+    maskOk = ~isempty(basicRoadMask) && hasBasicMaskRoadNearby(basicRoadMask, row, col);
 
     for r = row-radius:row+radius
         for c = col-radius:col+radius
@@ -387,7 +450,8 @@ function isRoad = isBasicRoadPoint(mapImage, basicRoadMask, row, col)
         end
     end
 
-    isRoad = roadLikeCount >= totalCount * 0.35;
+    colorOk = roadLikeCount >= totalCount * 0.35;
+    isRoad = maskOk || colorOk;
 end
 
 function hasRoad = hasBasicMaskRoadNearby(maskImage, row, col)
@@ -423,13 +487,55 @@ end
 function refreshDisplay(fig)
     S = getS(fig); if isempty(S.mapOrigin), return; end
     map = buildBaseMap(fig);
-    if S.rotDeg ~= 0
-        S = getS(fig); S.mapDisplay = rotateMap(map, S.rotDeg);
-        S.rotSize = [size(S.mapDisplay,1), size(S.mapDisplay,2)];
+    if S.headUpMode
+        % OR3 车头朝上模式：绕选定车辆中心旋转地图
+        vAngle = S.headUpAngle;
+        vcx    = S.mapW / 2;
+        vcy    = S.mapH / 2;
+        if ~isempty(S.vehicles) && isfield(S.handles,'ivDropdown') && isvalid(S.handles.ivDropdown)
+            sel = S.handles.ivDropdown.Value;
+            tok = regexp(sel, '#(\d+)', 'tokens', 'once');
+            if ~isempty(tok)
+                vid = str2double(tok{1});
+                idx = find(arrayfun(@(v) v.id==vid, S.vehicles), 1);
+                if ~isempty(idx)
+                    vAngle = S.vehicles(idx).angle;
+                    vcx    = S.vehicles(idx).cx;
+                    vcy    = S.vehicles(idx).cy;
+                    S.headUpAngle = vAngle;
+                end
+            end
+        end
+        S.mapDisplay = or3_auto_align('rotateAround', map, vcx, vcy, headUpRotation(vAngle));
+        S.rotSize    = [size(S.mapDisplay,1), size(S.mapDisplay,2)];
+        S.rotCX      = [];
+        S.rotCY      = [];
+        S.headUpCX   = vcx;
+        S.headUpCY   = vcy;
+    elseif S.rotDeg ~= 0
+        if isempty(S.rotCX) || isempty(S.rotCY)
+            S.rotCX = (S.mapW + 1) / 2;
+            S.rotCY = (S.mapH + 1) / 2;
+        end
+        S.mapDisplay = rotateMapAroundPoint(map, S.rotCX, S.rotCY, S.rotDeg);
+        S.rotSize    = [size(S.mapDisplay,1), size(S.mapDisplay,2)];
+        S.viewCenter = mapOriginalPointToDisplay(S, S.rotCX, S.rotCY);
+        S.headUpCX   = [];
+        S.headUpCY   = [];
     else
-        S.mapDisplay = map; S.rotSize = [];
+        S.mapDisplay = map;
+        S.rotSize    = [];
+        S.rotCX      = [];
+        S.rotCY      = [];
+        S.headUpCX   = [];
+        S.headUpCY   = [];
     end
     setS(fig, S); refreshView(fig);
+end
+
+function deg = headUpRotation(vehicleAngle)
+%HEADUPROTATION  UI 中补偿到车头朝上。
+    deg = 90 - vehicleAngle;
 end
 
 function mapOut = drawIV(mapIn, cx, cy, angleDeg, dispScale, mapW, mapH, scale)
@@ -611,9 +717,16 @@ end
 
 function onBtnLoadIV(fig)
     S = getS(fig);
+    if strcmp(S.mode, 'loadIV')
+        % 已在加载模式，再次点击取消
+        S.mode = 'idle';
+        setS(fig, S);
+        setStatus(fig, '加载车辆模式已取消。');
+        return;
+    end
     S.mode = 'loadIV';
     setS(fig, S);
-    setStatus(fig, '加载车辆模式：点击地图上的道路位置放置车辆。');
+    setStatus(fig, '加载车辆模式：点击地图上的道路位置放置车辆。（再次点击"加载车辆"可取消）');
 end
 
 function onBtnRemoveIV(fig)
@@ -713,6 +826,20 @@ function onAngleChanged(fig, src)
             end
         end
     end
+    end
+
+function onIVDropdownChanged(fig)
+%ONIVDROPDOWNCHANGED  切换下拉选中车辆时同步角度滑条与标签
+    S = getS(fig);
+    sel = S.handles.ivDropdown.Value;
+    tok = regexp(sel, '#(\d+)', 'tokens', 'once');
+    if isempty(tok), return; end
+    vid = str2double(tok{1});
+    idx = find(arrayfun(@(v) v.id==vid, S.vehicles), 1);
+    if isempty(idx), return; end
+    ang = S.vehicles(idx).angle;
+    S.handles.angleSlider.Value = ang;
+    S.handles.angleValue.Text = sprintf('当前: %.0f°', ang);
 end
 
 function onBtnReportIV(fig)
@@ -730,6 +857,111 @@ function onBtnReportIV(fig)
     msg = strjoin(lines, newline);
     uialert(fig, msg, '所有车辆位置报告');
     setStatus(fig, sprintf('已报告 %d 辆车的位置。', numel(S.vehicles)));
+end
+
+%% ====================================================================
+%   OR3 车头朝向相关回调
+%% ====================================================================
+function onBtnOR3(fig)
+%ONBTNOR3  打开 OR3 车辆朝向设置弹窗
+    S = getS(fig);
+    if isfield(S, 'or3Fig') && ~isempty(S.or3Fig) && isvalid(S.or3Fig)
+        figure(S.or3Fig);
+        return;
+    end
+    or3Fig = uifigure('Name', 'OR3 车辆朝向工具', ...
+                      'Position', [160 160 300 260], ...
+                      'Resize', 'off');
+    setappdata(or3Fig, 'mainFig', fig);
+
+    gl = uigridlayout(or3Fig, [7 1]);
+    gl.RowHeight = repmat({'fit'}, 7, 1);
+    gl.ColumnWidth = {'1x'};
+
+    r = 0;
+    function c = addC(type, rowIdx, varargin)
+        c = feval(['ui' type], gl, varargin{:});
+        c.Layout.Row = rowIdx; c.Layout.Column = 1;
+    end
+
+    r = r + 1;
+    addC('label', r, 'Text', 'OR3 车辆朝向工具', ...
+         'FontSize', 14, 'FontWeight', 'bold', 'HorizontalAlignment', 'center');
+    r = r + 1;
+    addC('label', r, 'Text', '──── 功能说明 ────', 'FontSize', 11, 'FontWeight', 'bold');
+    r = r + 1;
+    addC('label', r, 'Text', '自动对齐：加载车辆时自动与道路走向对齐。', ...
+         'FontSize', 9, 'WordWrap', 'on');
+    r = r + 1;
+    addC('label', r, 'Text', '车头朝上：地图围绕选定车辆旋转，使车头始终指向上方。', ...
+         'FontSize', 9, 'WordWrap', 'on');
+    r = r + 1;
+    addC('label', r, 'Text', '──── 操作 ────', 'FontSize', 11, 'FontWeight', 'bold');
+    r = r + 1;
+    addC('button', r, 'Text', '对齐到道路（当前车辆）', ...
+         'ButtonPushedFcn', @(~,~) onBtnAlignCurrent(fig, or3Fig));
+    r = r + 1;
+    addC('button', r, 'Text', '关闭', ...
+         'ButtonPushedFcn', @(~,~) close(or3Fig));
+
+    S = getS(fig);
+    S.or3Fig = or3Fig;
+    setappdata(fig, 'S', S);
+    set(or3Fig, 'CloseRequestFcn', @(~,~) close(or3Fig));
+end
+
+function onBtnAlignCurrent(fig, or3Fig)
+%ONBTNALIGNCURRENT  将当前选中车辆的角度对齐到最近道路方向
+    S = getS(fig);
+    if isempty(S.vehicles)
+        uialert(or3Fig, '当前没有已加载的车辆。', '提示');
+        return;
+    end
+    sel = S.handles.ivDropdown.Value;
+    tok = regexp(sel, '#(\d+)', 'tokens', 'once');
+    if isempty(tok)
+        uialert(or3Fig, '请先在下拉列表中选中一辆车辆。', '提示');
+        return;
+    end
+    vid = str2double(tok{1});
+    idx = find(arrayfun(@(v) v.id==vid, S.vehicles), 1);
+    if isempty(idx), return; end
+    newAngle = or3_auto_align('findAngle', fig, S.vehicles(idx).cx, S.vehicles(idx).cy);
+    S.vehicles(idx).angle = newAngle;
+    if S.headUpMode
+        S.headUpAngle = newAngle;
+    end
+    setS(fig, S);
+    refreshDisplay(fig);
+    if isfield(S.handles,'angleSlider') && isvalid(S.handles.angleSlider)
+        S.handles.angleSlider.Value = newAngle;
+    end
+    setStatus(fig, sprintf('车辆 #%d 朝向已对齐至 %.1f°', vid, newAngle));
+end
+
+function onHeadUpToggled(fig, src)
+%ONHEADUPTOGGLED  "车头始终朝上"复选框状态改变
+    S = getS(fig);
+    S.headUpMode = src.Value;
+    if S.headUpMode
+        % 记录当前选定车辆的角度用于 head-up 旋转
+        if ~isempty(S.vehicles) && isfield(S.handles,'ivDropdown') && isvalid(S.handles.ivDropdown)
+            sel = S.handles.ivDropdown.Value;
+            tok = regexp(sel, '#(\d+)', 'tokens', 'once');
+            if ~isempty(tok)
+                vid = str2double(tok{1});
+                idx = find(arrayfun(@(v) v.id==vid, S.vehicles), 1);
+                if ~isempty(idx)
+                    S.headUpAngle = S.vehicles(idx).angle;
+                end
+            end
+        end
+        setStatus(fig, '车头朝上模式已启用：地图将围绕选定车辆旋转。');
+    else
+        setStatus(fig, '车头朝上模式已关闭。');
+    end
+    setS(fig, S);
+    refreshDisplay(fig);
 end
 
 %% ====================================================================
@@ -832,13 +1064,42 @@ function drawMeasurement(fig)
     for i = 1:size(pts,1)
         map = stampSquare(map, pts(i,1), pts(i,2), 2, uint8([220 0 220]), W, H);
     end
-    % 3. 应用旋转
-    if S.rotDeg ~= 0
-        S.mapDisplay = rotateMap(map, S.rotDeg);
+    % 3. 应用旋转（与 refreshDisplay 一致的逻辑）
+    if S.headUpMode
+        vAngle = S.headUpAngle;
+        vcx = S.mapW / 2;  vcy = S.mapH / 2;
+        if ~isempty(S.vehicles)
+            sel = S.handles.ivDropdown.Value;
+            tok = regexp(sel, '#(\d+)', 'tokens', 'once');
+            if ~isempty(tok)
+                vid = str2double(tok{1});
+                idx = find(arrayfun(@(v) v.id==vid, S.vehicles), 1);
+                if ~isempty(idx)
+                    vAngle = S.vehicles(idx).angle;
+                    vcx = S.vehicles(idx).cx;
+                    vcy = S.vehicles(idx).cy;
+                end
+            end
+        end
+        S.mapDisplay = or3_auto_align('rotateAround', map, vcx, vcy, headUpRotation(vAngle));
+        S.rotSize    = [size(S.mapDisplay,1), size(S.mapDisplay,2)];
+        S.rotCX      = [];
+        S.rotCY      = [];
+        S.headUpCX   = vcx;
+        S.headUpCY   = vcy;
+    elseif S.rotDeg ~= 0
+        if isempty(S.rotCX) || isempty(S.rotCY)
+            S.rotCX = (S.mapW + 1) / 2;
+            S.rotCY = (S.mapH + 1) / 2;
+        end
+        S.mapDisplay = rotateMapAroundPoint(map, S.rotCX, S.rotCY, S.rotDeg);
         S.rotSize = [size(S.mapDisplay,1), size(S.mapDisplay,2)];
+        S.viewCenter = mapOriginalPointToDisplay(S, S.rotCX, S.rotCY);
     else
         S.mapDisplay = map;
         S.rotSize = [];
+        S.rotCX = [];
+        S.rotCY = [];
     end
     setS(fig, S);
     refreshView(fig);
@@ -854,65 +1115,122 @@ function onResize(fig, ~)
     set(S.ax,    'Position', [panelWidth 0 pos(3)-panelWidth pos(4)]);
 end
 
+function onZoomChanged(fig, src)
+    S = getS(fig);
+    S.viewZoom = max(1, src.Value);
+    S.viewCenter = [mean(S.ax.XLim), mean(S.ax.YLim)];
+    if isfield(S.handles,'zoomLabel') && isvalid(S.handles.zoomLabel)
+        S.handles.zoomLabel.Text = sprintf('显示缩放: %.1fx', S.viewZoom);
+    end
+    setS(fig, S);
+    applyViewLimits(fig);
+end
+
+function onResetView(fig)
+    S = getS(fig);
+    S.viewZoom = 1;
+    S.viewCenter = [];
+    if isfield(S.handles,'zoomSlider') && isvalid(S.handles.zoomSlider)
+        S.handles.zoomSlider.Value = 1;
+    end
+    if isfield(S.handles,'zoomLabel') && isvalid(S.handles.zoomLabel)
+        S.handles.zoomLabel.Text = '显示缩放: 1.0x';
+    end
+    setS(fig, S);
+    applyViewLimits(fig);
+end
+
 
 %% ====================================================================
 %   旋转地图（占位回调，步骤 E 实现）
 %% ====================================================================
 function onRotChanged(fig, src)
-%ONROTCHANGED  地图旋转回调（滑条）；对完整叠加图(地图+骨架+车辆)做手搓反向映射旋转
+%ONROTCHANGED  地图旋转回调（滑条）；对完整叠加图(地图+骨架+车辆)做反向映射旋转
     deg = round(src.Value);
     S = getS(fig);
     if isempty(S.mapOrigin), return; end
+    if ~S.headUpMode
+        viewCenterD = getCurrentDisplayCenter(S);
+        anchor = mapDisplayPointToOriginal(S, viewCenterD(1), viewCenterD(2));
+        if ~isempty(anchor)
+            S.rotCX = anchor(1);
+            S.rotCY = anchor(2);
+        elseif isempty(S.rotCX) || isempty(S.rotCY)
+            S.rotCX = (S.mapW + 1) / 2;
+            S.rotCY = (S.mapH + 1) / 2;
+        end
+    end
     % 同步滑条与标签
     src.Value = deg;
     if isfield(S.handles,'rotLabel') && isvalid(S.handles.rotLabel)
         S.handles.rotLabel.Text = sprintf('旋转角度 (度): %.0f', deg);
     end
     S.rotDeg = deg;
+    if deg ~= 0 && S.viewZoom < 1.25
+        S.viewZoom = 1.25;
+        S.viewCenter = [];
+        if isfield(S.handles,'zoomSlider') && isvalid(S.handles.zoomSlider)
+            S.handles.zoomSlider.Value = S.viewZoom;
+        end
+        if isfield(S.handles,'zoomLabel') && isvalid(S.handles.zoomLabel)
+            S.handles.zoomLabel.Text = sprintf('显示缩放: %.1fx', S.viewZoom);
+        end
+    end
+    if deg == 0 && ~S.headUpMode
+        S.rotCX = [];
+        S.rotCY = [];
+    end
     setS(fig, S);
     % drawAllVehicles 会构建复合图并按 rotDeg 旋转（保证骨架/车辆一起转、不丢失）
     refreshDisplay(fig);
-    setStatus(fig, sprintf('地图已旋转 %.0f°（手搓反向映射）。', deg));
+    setStatus(fig, sprintf('地图已旋转 %.0f°', deg));
 end
 
-function out = rotateMap(img, deg)
-%ROTATEMAP  手搓图像旋转（反向映射 + 最近邻采样）
-%  对输出图每个像素，反向映射回原图取最近邻像素值。
+
+
+function out = rotateMapAroundPoint(img, cx, cy, deg)
+%ROTATEMAPAROUNDPOINT  手搓图像绕任意点旋转（反向映射 + 最近邻采样）
     [H, W, ~] = size(img);
     th = deg2rad(deg);
     c = cos(th); s = sin(th);
 
     % 1. 计算旋转后新画布的外接尺寸
-    corners = [0 0; W 0; W H; 0 H];
-    rotCorners = corners * [c -s; s c]';
-    newW = ceil(max(rotCorners(:,1)) - min(rotCorners(:,1)));
-    newH = ceil(max(rotCorners(:,2)) - min(rotCorners(:,2)));
-    out = uint8(zeros(newH, newW, 3));
-
-    % 2. 新旧画布中心
-    cxOld = W/2; cyOld = H/2;
-    cxNew = newW/2; cyNew = newH/2;
+    [newH, newW, shiftCol, shiftRow] = getRotationCanvasInfo(W, H, cx, cy, deg);
+    out = uint8(255 * ones(newH, newW, 3));
 
     % 3. 向量化反向映射（避免慢速双重循环）
-    [rr, cc] = meshgrid(1:newW, 1:newH);  % rr=行(y), cc=列(x)
-    x = cc(:) - cxNew;          % 相对新中心
-    y = rr(:) - cyNew;
+    [rowGrid, colGrid] = ndgrid(1:newH, 1:newW);
+    rotX = shiftCol + colGrid(:) - 1;
+    rotY = shiftRow + rowGrid(:) - 1;
+    xRot = rotX - cx;
+    yRot = rotY - cy;
     % 反向旋转（用 -th）：将新图坐标映射回原图坐标
-    xOld =  x*c + y*s + cxOld;
-    yOld = -x*s + y*c + cyOld;
+    xOld =  xRot*c + yRot*s + cx;
+    yOld = -xRot*s + yRot*c + cy;
     rOld = round(yOld);
     cOld = round(xOld);
     % 4. 有效区域掩膜
     valid = rOld>=1 & rOld<=H & cOld>=1 & cOld<=W;
     idx = find(valid);
-    out(idx) = img(rOld(idx) + (cOld(idx)-1)*H);   % 线性索引（列优先）
-    % RGB 三通道一起赋值（上面的线性索引对 3D 自动广播）
     for ch = 1:3
         tmp = out(:,:,ch);
         tmp2 = img(:,:,ch);
         tmp(idx) = tmp2(rOld(idx) + (cOld(idx)-1)*H);
         out(:,:,ch) = tmp;
     end
+end
+
+function [newH, newW, shiftCol, shiftRow] = getRotationCanvasInfo(W, H, cx, cy, deg)
+    th = deg2rad(deg);
+    c = cos(th);
+    s = sin(th);
+    corners = [0.5 0.5; W + 0.5 0.5; W + 0.5 H + 0.5; 0.5 H + 0.5];
+    centered = corners - [cx cy];
+    rotCorners = centered * [c -s; s c]' + [cx cy];
+    shiftCol = min(rotCorners(:,1));
+    shiftRow = min(rotCorners(:,2));
+    newW = ceil(max(rotCorners(:,1)) - shiftCol);
+    newH = ceil(max(rotCorners(:,2)) - shiftRow);
 end
 
 
@@ -951,13 +1269,50 @@ function refreshView(fig)
     [dH, dW, ~] = size(S.mapDisplay);
     imshow(S.mapDisplay, 'Parent', S.ax);
     axis(S.ax, 'image');
-    % 按【显示图】尺寸设定坐标范围，保证旋转后大图不被裁切
-    set(S.ax, 'XLim',[0.5 dW+0.5], 'YLim',[0.5 dH+0.5], ...
-              'YDir','reverse');
     % 记录显示尺寸，供 getPointerOnAxes 做边界判定与反旋转
     S = getS(fig);
     S.dispH = dH; S.dispW = dW;
     setS(fig, S);
+    applyViewLimits(fig);
+end
+
+function applyViewLimits(fig)
+    S = getS(fig);
+    if S.dispW <= 0 || S.dispH <= 0, return; end
+    z = max(1, S.viewZoom);
+    if isempty(S.viewCenter)
+        center = [(S.dispW + 1) / 2, (S.dispH + 1) / 2];
+    else
+        center = S.viewCenter;
+    end
+    halfW = S.dispW / (2 * z);
+    halfH = S.dispH / (2 * z);
+    xlim = clampWindow([center(1)-halfW, center(1)+halfW], 0.5, S.dispW + 0.5);
+    ylim = clampWindow([center(2)-halfH, center(2)+halfH], 0.5, S.dispH + 0.5);
+    set(S.ax, 'XLim', xlim, 'YLim', ylim, 'YDir', 'reverse');
+    S.viewCenter = [mean(xlim), mean(ylim)];
+    setS(fig, S);
+end
+
+function lim = clampWindow(lim, lo, hi)
+    width = lim(2) - lim(1);
+    fullWidth = hi - lo;
+    if width >= fullWidth
+        lim = [lo hi];
+    elseif lim(1) < lo
+        lim = [lo lo + width];
+    elseif lim(2) > hi
+        lim = [hi - width hi];
+    end
+end
+
+function ok = isPointerInDisplay(fig, ax)
+    S = getS(fig);
+    ok = false;
+    if ~isgraphics(ax), return; end
+    cp = get(ax, 'CurrentPoint');
+    colD = cp(1,1); rowD = cp(1,2);
+    ok = colD >= 1 && colD <= S.dispW && rowD >= 1 && rowD <= S.dispH;
 end
 
 function pt = getPointerOnAxes(fig, ax)
@@ -973,27 +1328,72 @@ function pt = getPointerOnAxes(fig, ax)
     if colD < 1 || colD > S.dispW || rowD < 1 || rowD > S.dispH
         return;
     end
-    if S.rotDeg ~= 0 && ~isempty(S.rotSize)
-        % 反旋转：显示坐标 -> 原图坐标
-        th = deg2rad(S.rotDeg);
-        c = cos(th); s = sin(th);
-        newH = S.rotSize(1); newW = S.rotSize(2);
-        x = colD - newW/2;          % 相对新(显示)中心
-        y = rowD - newH/2;
-        colO =  x*c + y*s + S.mapW/2;   % 反向旋转(-th)回原图
-        rowO = -x*s + y*c + S.mapH/2;
-        col = colO; row = rowO;
-        % 必须落在原图范围内（旋转后的黑边区域视为无效）
-        if col < 1 || col > S.mapW || row < 1 || row > S.mapH
-            return;
-        end
+    pt = mapDisplayPointToOriginal(S, colD, rowD);
+end
+
+function center = getCurrentDisplayCenter(S)
+    if isempty(S.viewCenter)
+        center = [(S.dispW + 1) / 2, (S.dispH + 1) / 2];
     else
-        col = colD; row = rowD;
+        center = S.viewCenter;
+    end
+end
+
+function pt = mapDisplayPointToOriginal(S, colD, rowD)
+    pt = [];
+    if S.headUpMode && ~isempty(S.headUpCX)
+        deg = headUpRotation(S.headUpAngle);
+        cx0 = S.headUpCX;
+        cy0 = S.headUpCY;
+    elseif ~isempty(S.rotSize) && S.rotDeg ~= 0 && ~isempty(S.rotCX) && ~isempty(S.rotCY)
+        deg = S.rotDeg;
+        cx0 = S.rotCX;
+        cy0 = S.rotCY;
+    else
+        if colD < 1 || colD > S.mapW || rowD < 1 || rowD > S.mapH
+            return;
+        end
+        pt = [colD rowD];
+        return;
+    end
+    th = deg2rad(deg);
+    [~, ~, shiftCol, shiftRow] = getRotationCanvasInfo(S.mapW, S.mapH, cx0, cy0, deg);
+    rotCol = shiftCol + colD - 1;
+    rotRow = shiftRow + rowD - 1;
+    xRot = rotCol - cx0;
+    yRot = rotRow - cy0;
+    colO = xRot * cos(th) + yRot * sin(th) + cx0;
+    rowO = -xRot * sin(th) + yRot * cos(th) + cy0;
+    if colO < 1 || colO > S.mapW || rowO < 1 || rowO > S.mapH
+        return;
+    end
+    pt = [colO rowO];
+end
+
+function pt = mapOriginalPointToDisplay(S, col, row)
+    pt = [];
+    if S.headUpMode && ~isempty(S.headUpCX)
+        deg = headUpRotation(S.headUpAngle);
+        cx0 = S.headUpCX;
+        cy0 = S.headUpCY;
+    elseif ~isempty(S.rotSize) && S.rotDeg ~= 0 && ~isempty(S.rotCX) && ~isempty(S.rotCY)
+        deg = S.rotDeg;
+        cx0 = S.rotCX;
+        cy0 = S.rotCY;
+    else
         if col < 1 || col > S.mapW || row < 1 || row > S.mapH
             return;
         end
+        pt = [col row];
+        return;
     end
-    pt = [col row];
+    th = deg2rad(deg);
+    [~, ~, shiftCol, shiftRow] = getRotationCanvasInfo(S.mapW, S.mapH, cx0, cy0, deg);
+    x = col - cx0;
+    y = row - cy0;
+    rotCol = x * cos(th) - y * sin(th) + cx0;
+    rotRow = x * sin(th) + y * cos(th) + cy0;
+    pt = [rotCol - shiftCol + 1, rotRow - shiftRow + 1];
 end
 
 function [wx, wy] = px2world(fig, col, row)
